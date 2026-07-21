@@ -1,0 +1,10 @@
+(
+    id: "conduct.human",
+    methods: [
+        (
+            slot: "conduct.use_toilet",
+            plan: "plan.toilet_need",
+            priority: 0,
+        ),
+    ],
+)

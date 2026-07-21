@@ -1,0 +1,6 @@
+(
+    id: "plan.toilet_need",
+    object: "object.cottage_toilet",
+    affordance: "affordance.use_toilet",
+    priority: 0,
+)

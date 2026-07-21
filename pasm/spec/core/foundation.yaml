@@ -129,7 +129,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Validated Content Registry
-      summary: Shared workspace RON assets currently define the Cottage Arrival scenario, people, map, and placed smart objects, loaded through typed Rust definitions. Items, recipes, plans, and conducts are planned content domains.
+      summary: Shared workspace RON assets currently define the Cottage Arrival scenario, people, map, placed smart objects, Human conduct, and toilet plan, loaded through typed Rust definitions. Items, recipes, and wider interaction domains remain planned content domains.
       references: [cottage-arrival-scenario]
     implementation:
       status: declared

@@ -31,18 +31,18 @@ entities:
       status: implemented
       confidence: confirmed
       title: Cottage Needs and Affordances
-      summary: "The first interaction is a data-defined contested toilet: its authored affordance claims a named slot and hands only while executing. The remaining household interactions and need motivation remain later MVP work."
+      summary: "The first interaction is a data-defined contested toilet: its authored affordance claims a named slot and hands only while executing. A deliberately narrow scalar Toilet need decays, selects a Human conduct method through a named RON plan with intention-owned hysteresis, and recovers only when ObjectUseCompleted. Explicit player work suppresses competing autonomous requests. The remaining household interactions and need motivation remain later MVP work."
       references: [smart-objects, initial-needs-and-recipes]
     implementation:
       status: declared
-      paths: [crates/village_sim/src/lib.rs, assets/content/objects/cottage.ron]
+      paths: [crates/village_sim/src/lib.rs, assets/content/objects/cottage.ron, assets/content/people/newcomers.ron, assets/content/conducts/human.ron, assets/content/plans/toilet_need.ron]
 
   - component: cottage-content-fixture
     core:
       status: implemented
       confidence: confirmed
       title: Cottage Content Fixture
-      summary: Shared RON content currently defines the Cottage Arrival scenario, two named newcomers, a fixed seed, starting placements, a compact two-floor map, and a placed toilet object. Items, conducts, and plans are introduced by later MVP slices.
+      summary: Shared RON content currently defines the Cottage Arrival scenario, two named newcomers, a fixed seed, starting placements, a compact two-floor map, a placed toilet object, the Human conduct, and its toilet plan. Items, recipes, and wider interaction domains remain deferred.
       references: [content-registry, cottage-arrival-scenario]
     implementation:
       status: declared

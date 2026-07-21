@@ -50,6 +50,27 @@ pub struct PlayerTaskId(pub u64);
 pub struct PersonDefinition {
     pub id: DefinitionId,
     pub display_name: String,
+    #[serde(default)]
+    pub needs: Vec<NeedDefinition>,
+    #[serde(default)]
+    pub conducts: Vec<DefinitionId>,
+}
+
+/// The intentionally small first need schema. More needs will use the same
+/// authored shape once Cottage Contention is proven.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NeedDefinition {
+    pub kind: NeedKind,
+    pub initial: u8,
+    pub decay_per_tick: u8,
+    pub activate_at: u8,
+    pub retain_above: u8,
+    pub recovery: u8,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum NeedKind {
+    Toilet,
 }
 
 /// All people definitions loaded for one scenario.
@@ -148,6 +169,30 @@ pub struct ObjectsAsset {
     pub objects: Vec<SmartObjectDefinition>,
 }
 
+/// A conduct maps a behaviour slot to an authored plan. Slice five supports
+/// only the Human toilet method; the priority field preserves the intended
+/// conduct-resolution contract without prematurely building generic HTN.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConductAsset {
+    pub id: DefinitionId,
+    pub methods: Vec<ConductMethodDefinition>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConductMethodDefinition {
+    pub slot: DefinitionId,
+    pub plan: DefinitionId,
+    pub priority: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlanAsset {
+    pub id: DefinitionId,
+    pub object: DefinitionId,
+    pub affordance: DefinitionId,
+    pub priority: i32,
+}
+
 /// The content required to construct a scenario runner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScenarioContent {
@@ -155,6 +200,8 @@ pub struct ScenarioContent {
     pub people: PeopleAsset,
     pub map: MapAsset,
     pub objects: ObjectsAsset,
+    pub conducts: Vec<ConductAsset>,
+    pub plans: Vec<PlanAsset>,
 }
 
 impl ScenarioContent {
@@ -165,11 +212,15 @@ impl ScenarioContent {
         let people = load_ron(content_root.join("people/newcomers.ron"))?;
         let map = load_ron(content_root.join("maps/cottage.ron"))?;
         let objects = load_ron(content_root.join("objects/cottage.ron"))?;
+        let conducts = vec![load_ron(content_root.join("conducts/human.ron"))?];
+        let plans = vec![load_ron(content_root.join("plans/toilet_need.ron"))?];
         Ok(Self {
             scenario,
             people,
             map,
             objects,
+            conducts,
+            plans,
         })
     }
 }
@@ -225,6 +276,20 @@ pub enum ContentError {
         occupied_by: DefinitionId,
         position: TilePosition,
     },
+    #[error("person {person:?} references missing conduct {conduct:?}")]
+    MissingConduct {
+        person: DefinitionId,
+        conduct: DefinitionId,
+    },
+    #[error("conduct {conduct:?} has no Human toilet method")]
+    MissingToiletMethod { conduct: DefinitionId },
+    #[error("conduct {conduct:?} references missing toilet plan {plan:?}")]
+    MissingToiletPlan {
+        conduct: DefinitionId,
+        plan: DefinitionId,
+    },
+    #[error("toilet plan {plan:?} names an invalid object affordance")]
+    InvalidToiletPlan { plan: DefinitionId },
 }
 
 /// The resident component retained on the authoritative ECS world.
@@ -281,6 +346,22 @@ struct ActiveObjectUse {
     capability: Capability,
     ticks_remaining: u8,
     player_task: Option<PlayerTaskId>,
+}
+
+#[derive(Clone, Debug)]
+struct ToiletNeedState {
+    value: u8,
+    decay_per_tick: u8,
+    activate_at: u8,
+    retain_above: u8,
+    recovery: u8,
+}
+
+#[derive(Clone, Debug)]
+struct ToiletPlan {
+    object: DefinitionId,
+    affordance: DefinitionId,
+    priority: i32,
 }
 
 /// A typed order submitted by the presentation client. Commands enter the
@@ -389,6 +470,10 @@ pub enum WorldEventKind {
         object: DefinitionId,
         affordance: DefinitionId,
     },
+    ToiletNeedRecovered {
+        resident: SimId,
+        value: u8,
+    },
     PlayerCommandAccepted {
         task: PlayerTaskId,
     },
@@ -433,6 +518,9 @@ pub struct Simulation {
     go_to: BTreeMap<SimId, GoToState>,
     use_requests: Vec<UseRequest>,
     active_object_uses: BTreeMap<SimId, ActiveObjectUse>,
+    toilet_needs: BTreeMap<SimId, ToiletNeedState>,
+    autonomous_toilet_plans: BTreeMap<SimId, ToiletPlan>,
+    autonomous_toilet_intentions: BTreeSet<SimId>,
     player_command_inbox: Vec<PlayerCommand>,
     player_tasks: BTreeMap<PlayerTaskId, PlayerTaskState>,
     object_slot_claims: BTreeMap<(DefinitionId, DefinitionId), SimId>,
@@ -471,6 +559,17 @@ impl Simulation {
             }
         }
 
+        let conducts = content
+            .conducts
+            .into_iter()
+            .map(|conduct| (conduct.id.clone(), conduct))
+            .collect::<BTreeMap<_, _>>();
+        let plans = content
+            .plans
+            .into_iter()
+            .map(|plan| (plan.id.clone(), plan))
+            .collect::<BTreeMap<_, _>>();
+
         let mut simulation = Self {
             world: World::new(),
             seed: content.scenario.seed,
@@ -484,6 +583,9 @@ impl Simulation {
             go_to: BTreeMap::new(),
             use_requests: Vec::new(),
             active_object_uses: BTreeMap::new(),
+            toilet_needs: BTreeMap::new(),
+            autonomous_toilet_plans: BTreeMap::new(),
+            autonomous_toilet_intentions: BTreeSet::new(),
             player_command_inbox: Vec::new(),
             player_tasks: BTreeMap::new(),
             object_slot_claims: BTreeMap::new(),
@@ -523,7 +625,26 @@ impl Simulation {
                     position: placement.position,
                 });
             }
-            simulation.spawn_resident(person, placement.position);
+            let sim_id = simulation.spawn_resident(person, placement.position);
+            if let Some(need) = person
+                .needs
+                .iter()
+                .find(|need| need.kind == NeedKind::Toilet)
+            {
+                let plan =
+                    resolve_human_toilet_plan(person, &conducts, &plans, &simulation.objects)?;
+                simulation.toilet_needs.insert(
+                    sim_id,
+                    ToiletNeedState {
+                        value: need.initial,
+                        decay_per_tick: need.decay_per_tick,
+                        activate_at: need.activate_at,
+                        retain_above: need.retain_above,
+                        recovery: need.recovery,
+                    },
+                );
+                simulation.autonomous_toilet_plans.insert(sim_id, plan);
+            }
         }
 
         Ok(simulation)
@@ -693,6 +814,26 @@ impl Simulation {
         self.capability_claims.get(&(resident, capability)).cloned()
     }
 
+    /// Returns the bounded Toilet need value, where higher means more urgent.
+    #[must_use]
+    pub fn toilet_need(&self, resident: SimId) -> Option<u8> {
+        self.toilet_needs.get(&resident).map(|need| need.value)
+    }
+
+    /// Test and debug support for setting the narrow first autonomous need.
+    pub fn set_toilet_need(&mut self, resident: SimId, value: u8) -> bool {
+        let Some(need) = self.toilet_needs.get_mut(&resident) else {
+            return false;
+        };
+        need.value = value;
+        true
+    }
+
+    #[must_use]
+    pub fn has_autonomous_toilet_intention(&self, resident: SimId) -> bool {
+        self.autonomous_toilet_intentions.contains(&resident)
+    }
+
     /// Consumes exactly one deterministic 250 ms simulation tick.
     ///
     /// Events published by a preceding tick first become observable here;
@@ -702,6 +843,8 @@ impl Simulation {
         self.tick += 1;
 
         self.ingest_player_commands();
+        self.update_toilet_needs();
+        self.choose_autonomous_toilet_plans();
         self.tick_go_to();
         self.tick_object_uses();
 
@@ -713,6 +856,59 @@ impl Simulation {
         };
         self.event_ledger.push(event.clone());
         self.pending_events.push(event);
+    }
+
+    fn update_toilet_needs(&mut self) {
+        for need in self.toilet_needs.values_mut() {
+            need.value = need.value.saturating_add(need.decay_per_tick);
+        }
+    }
+
+    fn choose_autonomous_toilet_plans(&mut self) {
+        let residents = self.toilet_needs.keys().copied().collect::<Vec<_>>();
+        for resident in residents {
+            let need = self
+                .toilet_needs
+                .get(&resident)
+                .expect("resident was collected from toilet needs");
+            let selected = self.autonomous_toilet_intentions.contains(&resident);
+            if selected && need.value <= need.retain_above {
+                self.autonomous_toilet_intentions.remove(&resident);
+                continue;
+            }
+            if !selected && need.value < need.activate_at {
+                continue;
+            }
+            self.autonomous_toilet_intentions.insert(resident);
+
+            // Player work owns the resident's next action. An autonomous
+            // intention remains selected but deliberately does not compete.
+            if self.resident_has_player_work(resident)
+                || self.active_object_uses.contains_key(&resident)
+                || self
+                    .use_requests
+                    .iter()
+                    .any(|request| request.resident == resident)
+            {
+                continue;
+            }
+            let plan = self
+                .autonomous_toilet_plans
+                .get(&resident)
+                .expect("every toilet need has a resolved conduct plan")
+                .clone();
+            let _ = self.begin_use_object(resident, &plan.object, &plan.affordance, plan.priority);
+        }
+    }
+
+    fn resident_has_player_work(&self, resident: SimId) -> bool {
+        self.use_requests
+            .iter()
+            .any(|request| request.resident == resident && request.player_task.is_some())
+            || self
+                .active_object_uses
+                .get(&resident)
+                .is_some_and(|active| active.player_task.is_some())
     }
 
     fn ingest_player_commands(&mut self) {
@@ -753,6 +949,11 @@ impl Simulation {
             });
             return;
         }
+        // A queued autonomous request yields to the household's explicit
+        // order before either has claimed a slot. Active primitives remain
+        // safely non-preemptible and therefore report ResidentBusy.
+        self.use_requests
+            .retain(|request| request.resident != resident || request.player_task.is_some());
         if self.active_object_uses.contains_key(&resident)
             || self
                 .use_requests
@@ -765,13 +966,14 @@ impl Simulation {
             });
             return;
         }
-        let is_valid_target = self.objects.get(&object).is_some_and(|definition| {
-            definition
-                .affordances
-                .iter()
-                .any(|candidate| candidate.id == affordance)
-        });
-        if !is_valid_target {
+        // This command represents one semantic household order, rather than
+        // a generic "use any affordance" escape hatch. It must therefore use
+        // the resident's conduct-resolved toilet plan exactly.
+        let is_toilet_target = self
+            .autonomous_toilet_plans
+            .get(&resident)
+            .is_some_and(|plan| plan.object == object && plan.affordance == affordance);
+        if !is_toilet_target {
             self.emit(WorldEventKind::PlayerCommandRejected {
                 task,
                 reason: PlayerCommandRejection::InvalidUseTarget,
@@ -921,6 +1123,8 @@ impl Simulation {
                 .expect("active resident was collected from active uses");
             active.ticks_remaining = active.ticks_remaining.saturating_sub(1);
             if active.ticks_remaining == 0 {
+                let recovers_toilet_need =
+                    self.matches_resolved_toilet_plan(resident, &active.object, &active.affordance);
                 self.object_slot_claims
                     .remove(&(active.object.clone(), active.slot.clone()));
                 self.capability_claims
@@ -933,6 +1137,9 @@ impl Simulation {
                     object: active.object,
                     affordance: active.affordance,
                 });
+                if recovers_toilet_need {
+                    self.recover_toilet_need(resident);
+                }
             } else {
                 self.active_object_uses.insert(resident, active);
             }
@@ -992,6 +1199,27 @@ impl Simulation {
                 affordance: request.affordance,
             });
         }
+    }
+
+    fn recover_toilet_need(&mut self, resident: SimId) {
+        let Some(value) = self.toilet_needs.get_mut(&resident).map(|need| {
+            need.value = need.value.saturating_sub(need.recovery);
+            need.value
+        }) else {
+            return;
+        };
+        self.emit(WorldEventKind::ToiletNeedRecovered { resident, value });
+    }
+
+    fn matches_resolved_toilet_plan(
+        &self,
+        resident: SimId,
+        object: &DefinitionId,
+        affordance: &DefinitionId,
+    ) -> bool {
+        self.autonomous_toilet_plans
+            .get(&resident)
+            .is_some_and(|plan| plan.object == *object && plan.affordance == *affordance)
     }
 
     fn tick_one_go_to(&mut self, resident: SimId) {
@@ -1212,6 +1440,57 @@ impl Simulation {
     }
 }
 
+fn resolve_human_toilet_plan(
+    person: &PersonDefinition,
+    conducts: &BTreeMap<DefinitionId, ConductAsset>,
+    plans: &BTreeMap<DefinitionId, PlanAsset>,
+    objects: &BTreeMap<DefinitionId, SmartObjectDefinition>,
+) -> Result<ToiletPlan, ContentError> {
+    let conduct_id = person
+        .conducts
+        .first()
+        .ok_or_else(|| ContentError::MissingConduct {
+            person: person.id.clone(),
+            conduct: DefinitionId::new("conduct.human"),
+        })?;
+    let conduct = conducts
+        .get(conduct_id)
+        .ok_or_else(|| ContentError::MissingConduct {
+            person: person.id.clone(),
+            conduct: conduct_id.clone(),
+        })?;
+    let method = conduct
+        .methods
+        .iter()
+        .filter(|method| method.slot == DefinitionId::new("conduct.use_toilet"))
+        .max_by_key(|method| method.priority)
+        .ok_or_else(|| ContentError::MissingToiletMethod {
+            conduct: conduct.id.clone(),
+        })?;
+    let plan = plans
+        .get(&method.plan)
+        .ok_or_else(|| ContentError::MissingToiletPlan {
+            conduct: conduct.id.clone(),
+            plan: method.plan.clone(),
+        })?;
+    let is_valid = objects.get(&plan.object).is_some_and(|object| {
+        object
+            .affordances
+            .iter()
+            .any(|affordance| affordance.id == plan.affordance)
+    });
+    if !is_valid {
+        return Err(ContentError::InvalidToiletPlan {
+            plan: plan.id.clone(),
+        });
+    }
+    Ok(ToiletPlan {
+        object: plan.object.clone(),
+        affordance: plan.affordance.clone(),
+        priority: plan.priority + method.priority,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1232,6 +1511,32 @@ mod tests {
             ScenarioContent::load_cottage_arrival(content_root()).expect("fixture loads");
         content.scenario.seed = seed;
         Simulation::from_content(content).expect("fixture resolves")
+    }
+
+    fn add_non_toilet_object(simulation: &mut Simulation) -> DefinitionId {
+        let id = DefinitionId::new("object.cottage_sink");
+        simulation.objects.insert(
+            id.clone(),
+            SmartObjectDefinition {
+                id: id.clone(),
+                object_type: DefinitionId::new("object_type.sink"),
+                position: TilePosition {
+                    floor: 0,
+                    x: 4,
+                    y: 2,
+                },
+                slots: vec![ObjectSlotDefinition {
+                    id: DefinitionId::new("slot.use"),
+                }],
+                affordances: vec![ObjectAffordanceDefinition {
+                    id: DefinitionId::new("affordance.wash_hands"),
+                    slot: DefinitionId::new("slot.use"),
+                    capability: Capability::Hands,
+                    duration_ticks: 1,
+                }],
+            },
+        );
+        id
     }
 
     #[test]
@@ -1704,6 +2009,30 @@ mod tests {
     }
 
     #[test]
+    fn player_toilet_order_rejects_a_valid_non_toilet_affordance() {
+        let mut simulation = load_simulation();
+        let sink = add_non_toilet_object(&mut simulation);
+        let task = PlayerTaskId(420);
+
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task,
+            resident: SimId(1),
+            object: sink,
+            affordance: DefinitionId::new("affordance.wash_hands"),
+            priority: 0,
+        });
+        simulation.advance_tick();
+
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::PlayerCommandRejected {
+                    task,
+                    reason: PlayerCommandRejection::InvalidUseTarget,
+                }
+        }));
+    }
+
+    #[test]
     fn cancelling_an_active_player_task_releases_claims_without_completion() {
         let mut simulation = load_simulation();
         let (toilet, affordance, slot) = toilet_ids();
@@ -1790,5 +2119,123 @@ mod tests {
                     affordance: affordance.clone(),
                 }
         }));
+    }
+
+    #[test]
+    fn autonomous_toilet_need_uses_human_plan_and_recovers_only_on_completion() {
+        let mut simulation = load_simulation();
+        let (toilet, affordance, slot) = toilet_ids();
+
+        assert!(simulation.set_toilet_need(SimId(1), 50));
+        assert_eq!(simulation.toilet_need(SimId(1)), Some(50));
+        simulation.advance_tick();
+
+        assert!(simulation.has_autonomous_toilet_intention(SimId(1)));
+        assert_eq!(simulation.toilet_need(SimId(1)), Some(50));
+        assert_eq!(
+            simulation.object_slot_claimant(&toilet, &slot),
+            Some(SimId(1))
+        );
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::ObjectUseStarted {
+                    resident: SimId(1),
+                    object: toilet.clone(),
+                    affordance: affordance.clone(),
+                }
+        }));
+
+        simulation.advance_tick();
+        assert_eq!(simulation.toilet_need(SimId(1)), Some(0));
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::ToiletNeedRecovered {
+                    resident: SimId(1),
+                    value: 0,
+                }
+        }));
+    }
+
+    #[test]
+    fn non_toilet_object_completion_does_not_recover_toilet_need() {
+        let mut simulation = load_simulation();
+        let sink = add_non_toilet_object(&mut simulation);
+        let wash_hands = DefinitionId::new("affordance.wash_hands");
+        assert!(simulation.set_toilet_need(SimId(1), 30));
+
+        assert!(simulation.begin_use_object(SimId(1), &sink, &wash_hands, 0));
+        simulation.advance_tick();
+        simulation.advance_tick();
+
+        assert_eq!(simulation.toilet_need(SimId(1)), Some(30));
+        assert!(!simulation.event_ledger().iter().any(|event| {
+            matches!(
+                event.kind,
+                WorldEventKind::ToiletNeedRecovered {
+                    resident: SimId(1),
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn player_toilet_order_suppresses_a_competing_autonomous_request() {
+        let mut simulation = load_simulation();
+        let (toilet, affordance, slot) = toilet_ids();
+        let task = PlayerTaskId(55);
+
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task,
+            resident: SimId(1),
+            object: toilet.clone(),
+            affordance: affordance.clone(),
+            priority: 0,
+        });
+        simulation.advance_tick();
+
+        assert_eq!(
+            simulation.object_slot_claimant(&toilet, &slot),
+            Some(SimId(1))
+        );
+        assert!(
+            simulation
+                .event_ledger()
+                .iter()
+                .any(|event| { event.kind == WorldEventKind::PlayerCommandAccepted { task } })
+        );
+        assert_eq!(
+            simulation
+                .event_ledger()
+                .iter()
+                .filter(|event| matches!(
+                    event.kind,
+                    WorldEventKind::ObjectUseStarted {
+                        resident: SimId(1),
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn toilet_intention_uses_its_own_hysteresis_before_completion_recovers_it() {
+        let mut simulation = load_simulation();
+        assert!(simulation.set_toilet_need(SimId(1), 50));
+
+        simulation.advance_tick();
+        assert!(simulation.has_autonomous_toilet_intention(SimId(1)));
+        assert!(simulation.set_toilet_need(SimId(1), 21));
+
+        simulation.advance_tick();
+        // It remains selected below the activation threshold because its
+        // lower retention threshold belongs to the current intention.
+        assert!(simulation.has_autonomous_toilet_intention(SimId(1)));
+        assert_eq!(simulation.toilet_need(SimId(1)), Some(0));
+
+        simulation.advance_tick();
+        assert!(!simulation.has_autonomous_toilet_intention(SimId(1)));
     }
 }

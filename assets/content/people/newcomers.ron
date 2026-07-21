@@ -3,10 +3,32 @@
         (
             id: "person.newcomer_a",
             display_name: "Rowan Bell",
+            needs: [
+                (
+                    kind: Toilet,
+                    initial: 0,
+                    decay_per_tick: 0,
+                    activate_at: 50,
+                    retain_above: 20,
+                    recovery: 100,
+                ),
+            ],
+            conducts: ["conduct.human"],
         ),
         (
             id: "person.newcomer_b",
             display_name: "Mara Bell",
+            needs: [
+                (
+                    kind: Toilet,
+                    initial: 0,
+                    decay_per_tick: 0,
+                    activate_at: 50,
+                    retain_above: 20,
+                    recovery: 100,
+                ),
+            ],
+            conducts: ["conduct.human"],
         ),
     ],
 )
