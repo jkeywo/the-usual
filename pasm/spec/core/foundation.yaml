@@ -164,10 +164,10 @@ entities:
 
   - component: cottage-arrival-scenario
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Cottage Arrival Scenario
-      summary: Two newcomers in a hand-authored two-storey cottage provide the first headless test fixture and later playable opening.
+      summary: Two newcomers in a hand-authored two-storey cottage now provide the first headless fixture: both can traverse the paired stairs, and the fixture supplies the initial data-defined toilet interaction. Its later playable opening remains post-MVP work.
       references: [tile-navigation, smart-objects, agent-autonomy]
 
   - component: setting-direction
@@ -182,7 +182,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Seeded Runner Tests
-      summary: Headless runner tests assert stable resident identities, deferred event publication, and repeatable seed-derived event markers rather than full event logs.
+      summary: Headless runner tests assert stable resident identities, deferred event publication, and repeatable seed-derived event markers. The Cottage Contention composite test also drives two complete scripted fixtures and compares their semantic event ledgers without relying on a brittle golden log.
       references: [village-simulation, cottage-arrival-scenario]
     implementation:
       status: declared

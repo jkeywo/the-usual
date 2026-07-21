@@ -1,10 +1,10 @@
 entities:
   - system: cottage-arrival-mvp
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Cottage Arrival MVP
-      summary: A small headless vertical slice proving autonomous household behaviour, player orders, two-floor navigation, physical contention, safe cancellation, and semantic event assertions before pub or social-persistence work.
+      summary: A small headless vertical slice now proves a narrow autonomous Toilet need, player toilet orders, two-floor navigation, non-spatial object-claim contention, safe cancellation, and semantic event assertions before pub or social-persistence work.
       references: [cottage-arrival-scenario, scenario-test-harness, agent-autonomy, smart-objects, tile-navigation]
 
   - component: cottage-map-and-portals
@@ -20,10 +20,10 @@ entities:
 
   - component: cottage-household
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Newcomer Pair
-      summary: Two named newcomers form the initial household fixture. Their contrasting traits and relationship state are introduced by later MVP slices; both will remain autonomous.
+      summary: Two named newcomers form the initial household fixture, with stable authored IDs and runtime SimIds. Their contrasting traits and relationship state are introduced by later work; the implemented autonomous behaviour is the narrow Toilet-need path.
       references: [agent-autonomy, cottage-arrival-scenario]
 
   - component: cottage-needs-and-affordances
@@ -50,10 +50,10 @@ entities:
 
   - component: cottage-contention-test
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Cottage Contention Acceptance Test
-      summary: Two newcomers spawn in the cottage, traverse floors, contend for one object, execute and cancel a queued player order safely, and emit asserted semantic events. Re-running the seed produces the same sequence.
+      summary: One composite headless test runs two identical fixed-seed Cottage fixtures. Both newcomers traverse the stairs to distinct upstairs destinations and return; a direct toilet request waits behind a higher-priority player order, that order cancels safely, and the waiting request completes. It asserts deferred arrivals, semantic events, released claims, no resident overlap, and equal ledgers. Object use is intentionally not yet spatially situated.
       references: [scenario-test-harness, cottage-map-and-portals, cottage-household, cottage-needs-and-affordances]
 
   - component: cottage-player-order-cancellation

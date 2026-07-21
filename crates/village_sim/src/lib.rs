@@ -2238,4 +2238,186 @@ mod tests {
         simulation.advance_tick();
         assert!(!simulation.has_autonomous_toilet_intention(SimId(1)));
     }
+
+    fn assert_no_resident_overlap(simulation: &Simulation) {
+        let positions = simulation
+            .residents()
+            .into_iter()
+            .map(|(resident, _)| {
+                (
+                    resident,
+                    simulation
+                        .resident_position(resident)
+                        .expect("every fixture resident has a position"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(positions[0].1, positions[1].1, "residents never overlap");
+    }
+
+    fn advance_until_arrivals(
+        simulation: &mut Simulation,
+        first: (SimId, TilePosition),
+        second: (SimId, TilePosition),
+    ) {
+        let mut first_arrival_was_deferred = false;
+        let mut second_arrival_was_deferred = false;
+
+        for _ in 0..64 {
+            simulation.advance_tick();
+            assert_no_resident_overlap(simulation);
+            for event in simulation.ingested_events() {
+                match &event.kind {
+                    WorldEventKind::GoToArrived {
+                        resident,
+                        destination,
+                    } if (*resident, *destination) == first => {
+                        assert!(event.tick < simulation.tick());
+                        first_arrival_was_deferred = true;
+                    }
+                    WorldEventKind::GoToArrived {
+                        resident,
+                        destination,
+                    } if (*resident, *destination) == second => {
+                        assert!(event.tick < simulation.tick());
+                        second_arrival_was_deferred = true;
+                    }
+                    _ => {}
+                }
+            }
+            if first_arrival_was_deferred && second_arrival_was_deferred {
+                break;
+            }
+        }
+
+        assert!(
+            first_arrival_was_deferred,
+            "first resident arrives by a deferred event"
+        );
+        assert!(
+            second_arrival_was_deferred,
+            "second resident arrives by a deferred event"
+        );
+        assert_eq!(simulation.resident_position(first.0), Some(first.1));
+        assert_eq!(simulation.resident_position(second.0), Some(second.1));
+    }
+
+    fn run_cottage_contention_script() -> Vec<WorldEvent> {
+        let mut simulation = load_simulation();
+        let first = SimId(1);
+        let second = SimId(2);
+        let upstairs_first = TilePosition {
+            floor: 1,
+            x: 5,
+            y: 6,
+        };
+        let upstairs_second = TilePosition {
+            floor: 1,
+            x: 6,
+            y: 5,
+        };
+        let downstairs_first = TilePosition {
+            floor: 0,
+            x: 1,
+            y: 1,
+        };
+        let downstairs_second = TilePosition {
+            floor: 0,
+            x: 2,
+            y: 2,
+        };
+
+        assert!(simulation.begin_go_to(first, upstairs_first));
+        assert!(simulation.begin_go_to(second, upstairs_second));
+        advance_until_arrivals(
+            &mut simulation,
+            (first, upstairs_first),
+            (second, upstairs_second),
+        );
+
+        assert!(simulation.begin_go_to(first, downstairs_first));
+        assert!(simulation.begin_go_to(second, downstairs_second));
+        advance_until_arrivals(
+            &mut simulation,
+            (first, downstairs_first),
+            (second, downstairs_second),
+        );
+
+        // Object use is deliberately not coupled to resident position in
+        // this MVP. The assertion below proves the claim protocol only;
+        // spatial affordance reachability is a later slice.
+        let (toilet, affordance, slot) = toilet_ids();
+        let player_task = PlayerTaskId(600);
+        assert!(simulation.begin_use_object(second, &toilet, &affordance, 0));
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task: player_task,
+            resident: first,
+            object: toilet.clone(),
+            affordance: affordance.clone(),
+            priority: 1,
+        });
+        simulation.advance_tick();
+        assert_no_resident_overlap(&simulation);
+        assert_eq!(simulation.object_slot_claimant(&toilet, &slot), Some(first));
+        assert_eq!(
+            simulation.capability_claimant(first, Capability::Hands),
+            Some(toilet.clone())
+        );
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::ObjectUseWaited {
+                    resident: second,
+                    object: toilet.clone(),
+                    affordance: affordance.clone(),
+                    blocked_by: first,
+                }
+        }));
+
+        simulation.submit_player_command(PlayerCommand::CancelPlayerTask { task: player_task });
+        simulation.advance_tick();
+        assert_no_resident_overlap(&simulation);
+        assert_eq!(
+            simulation.capability_claimant(first, Capability::Hands),
+            None
+        );
+        assert_ne!(simulation.object_slot_claimant(&toilet, &slot), Some(first));
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::TaskCancelled {
+                    task: player_task,
+                    resident: first,
+                    object: toilet.clone(),
+                    affordance: affordance.clone(),
+                }
+        }));
+        assert_eq!(
+            simulation.object_slot_claimant(&toilet, &slot),
+            Some(second)
+        );
+
+        simulation.advance_tick();
+        assert_no_resident_overlap(&simulation);
+        assert_eq!(simulation.object_slot_claimant(&toilet, &slot), None);
+        assert_eq!(
+            simulation.capability_claimant(second, Capability::Hands),
+            None
+        );
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::ObjectUseCompleted {
+                    resident: second,
+                    object: toilet.clone(),
+                    affordance: affordance.clone(),
+                }
+        }));
+
+        simulation.event_ledger().to_vec()
+    }
+
+    #[test]
+    fn cottage_contention_fixture_is_deterministic_and_semantically_complete() {
+        let first = run_cottage_contention_script();
+        let second = run_cottage_contention_script();
+        assert_eq!(first, second, "the full scripted fixture is repeatable");
+    }
 }
