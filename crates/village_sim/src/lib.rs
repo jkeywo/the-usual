@@ -37,6 +37,14 @@ impl DefinitionId {
 #[serde(transparent)]
 pub struct SimId(pub u64);
 
+/// A caller-stable identifier for an order in the player's household queue.
+///
+/// The client chooses this value before submitting a command, so later
+/// cancellation does not depend on an implementation-private ECS entity.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct PlayerTaskId(pub u64);
+
 /// A resident definition authored in the people content domain.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PersonDefinition {
@@ -252,6 +260,7 @@ struct UseRequest {
     affordance: DefinitionId,
     priority: i32,
     request_age: u64,
+    player_task: Option<PlayerTaskId>,
 }
 
 /// One live claim to enter a tile this tick. Movement makes the same
@@ -271,6 +280,52 @@ struct ActiveObjectUse {
     slot: DefinitionId,
     capability: Capability,
     ticks_remaining: u8,
+    player_task: Option<PlayerTaskId>,
+}
+
+/// A typed order submitted by the presentation client. Commands enter the
+/// authoritative inbox immediately but are only validated during the next
+/// tick's ingest phase.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub enum PlayerCommand {
+    QueueUseToilet {
+        task: PlayerTaskId,
+        resident: SimId,
+        object: DefinitionId,
+        affordance: DefinitionId,
+        priority: i32,
+    },
+    CancelPlayerTask {
+        task: PlayerTaskId,
+    },
+}
+
+impl PlayerCommand {
+    #[must_use]
+    pub fn task(&self) -> PlayerTaskId {
+        match self {
+            Self::QueueUseToilet { task, .. } | Self::CancelPlayerTask { task } => *task,
+        }
+    }
+}
+
+/// Why a next-tick player command receipt was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum PlayerCommandRejection {
+    DuplicateTask,
+    InvalidUseTarget,
+    ResidentBusy,
+    UnknownResident,
+    UnknownTask,
+    TaskNotCancellable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlayerTaskState {
+    Queued,
+    Active,
+    Completed,
+    Cancelled,
 }
 
 fn compare_use_requests(left: &UseRequest, right: &UseRequest) -> std::cmp::Ordering {
@@ -334,6 +389,19 @@ pub enum WorldEventKind {
         object: DefinitionId,
         affordance: DefinitionId,
     },
+    PlayerCommandAccepted {
+        task: PlayerTaskId,
+    },
+    PlayerCommandRejected {
+        task: PlayerTaskId,
+        reason: PlayerCommandRejection,
+    },
+    TaskCancelled {
+        task: PlayerTaskId,
+        resident: SimId,
+        object: DefinitionId,
+        affordance: DefinitionId,
+    },
 }
 
 fn keyed_draw(seed: u64, tick: u64, event_id: u64, purpose: u64) -> u64 {
@@ -365,6 +433,8 @@ pub struct Simulation {
     go_to: BTreeMap<SimId, GoToState>,
     use_requests: Vec<UseRequest>,
     active_object_uses: BTreeMap<SimId, ActiveObjectUse>,
+    player_command_inbox: Vec<PlayerCommand>,
+    player_tasks: BTreeMap<PlayerTaskId, PlayerTaskState>,
     object_slot_claims: BTreeMap<(DefinitionId, DefinitionId), SimId>,
     capability_claims: BTreeMap<(SimId, Capability), DefinitionId>,
     pending_events: Vec<WorldEvent>,
@@ -414,6 +484,8 @@ impl Simulation {
             go_to: BTreeMap::new(),
             use_requests: Vec::new(),
             active_object_uses: BTreeMap::new(),
+            player_command_inbox: Vec::new(),
+            player_tasks: BTreeMap::new(),
             object_slot_claims: BTreeMap::new(),
             capability_claims: BTreeMap::new(),
             pending_events: Vec::new(),
@@ -588,8 +660,15 @@ impl Simulation {
             affordance: affordance.clone(),
             priority,
             request_age: self.tick,
+            player_task: None,
         });
         true
+    }
+
+    /// Places a typed player order into the inbox for validation during the
+    /// next tick. Submission itself never grants object or capability claims.
+    pub fn submit_player_command(&mut self, command: PlayerCommand) {
+        self.player_command_inbox.push(command);
     }
 
     /// Returns the resident currently executing in a named smart-object slot.
@@ -622,6 +701,7 @@ impl Simulation {
         self.ingested_events = std::mem::take(&mut self.pending_events);
         self.tick += 1;
 
+        self.ingest_player_commands();
         self.tick_go_to();
         self.tick_object_uses();
 
@@ -633,6 +713,136 @@ impl Simulation {
         };
         self.event_ledger.push(event.clone());
         self.pending_events.push(event);
+    }
+
+    fn ingest_player_commands(&mut self) {
+        let commands = std::mem::take(&mut self.player_command_inbox);
+        for command in commands {
+            match command {
+                PlayerCommand::QueueUseToilet {
+                    task,
+                    resident,
+                    object,
+                    affordance,
+                    priority,
+                } => self.ingest_queue_use_toilet(task, resident, object, affordance, priority),
+                PlayerCommand::CancelPlayerTask { task } => self.ingest_cancel_player_task(task),
+            }
+        }
+    }
+
+    fn ingest_queue_use_toilet(
+        &mut self,
+        task: PlayerTaskId,
+        resident: SimId,
+        object: DefinitionId,
+        affordance: DefinitionId,
+        priority: i32,
+    ) {
+        if self.player_tasks.contains_key(&task) {
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::DuplicateTask,
+            });
+            return;
+        }
+        if !self.residents.contains_key(&resident) {
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::UnknownResident,
+            });
+            return;
+        }
+        if self.active_object_uses.contains_key(&resident)
+            || self
+                .use_requests
+                .iter()
+                .any(|request| request.resident == resident)
+        {
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::ResidentBusy,
+            });
+            return;
+        }
+        let is_valid_target = self.objects.get(&object).is_some_and(|definition| {
+            definition
+                .affordances
+                .iter()
+                .any(|candidate| candidate.id == affordance)
+        });
+        if !is_valid_target {
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::InvalidUseTarget,
+            });
+            return;
+        }
+
+        self.player_tasks.insert(task, PlayerTaskState::Queued);
+        self.use_requests.push(UseRequest {
+            resident,
+            object,
+            affordance,
+            priority,
+            request_age: self.tick,
+            player_task: Some(task),
+        });
+        self.emit(WorldEventKind::PlayerCommandAccepted { task });
+    }
+
+    fn ingest_cancel_player_task(&mut self, task: PlayerTaskId) {
+        let Some(state) = self.player_tasks.get(&task).copied() else {
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::UnknownTask,
+            });
+            return;
+        };
+        if !matches!(state, PlayerTaskState::Queued | PlayerTaskState::Active) {
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::TaskNotCancellable,
+            });
+            return;
+        }
+
+        self.emit(WorldEventKind::PlayerCommandAccepted { task });
+        if state == PlayerTaskState::Queued {
+            let request = self
+                .use_requests
+                .iter()
+                .position(|request| request.player_task == Some(task))
+                .map(|index| self.use_requests.remove(index))
+                .expect("queued player task always has a use request");
+            self.player_tasks.insert(task, PlayerTaskState::Cancelled);
+            self.emit(WorldEventKind::TaskCancelled {
+                task,
+                resident: request.resident,
+                object: request.object,
+                affordance: request.affordance,
+            });
+            return;
+        }
+
+        let (resident, active) = self
+            .active_object_uses
+            .iter()
+            .find(|(_, active)| active.player_task == Some(task))
+            .map(|(resident, active)| (*resident, active.clone()))
+            .expect("active player task always has an active object use");
+        self.active_object_uses.remove(&resident);
+        self.object_slot_claims
+            .remove(&(active.object.clone(), active.slot.clone()));
+        self.capability_claims
+            .remove(&(resident, active.capability));
+        self.player_tasks.insert(task, PlayerTaskState::Cancelled);
+        self.emit(WorldEventKind::TaskCancelled {
+            task,
+            resident,
+            object: active.object,
+            affordance: active.affordance,
+        });
     }
 
     fn tick_go_to(&mut self) {
@@ -715,6 +925,9 @@ impl Simulation {
                     .remove(&(active.object.clone(), active.slot.clone()));
                 self.capability_claims
                     .remove(&(resident, active.capability));
+                if let Some(task) = active.player_task {
+                    self.player_tasks.insert(task, PlayerTaskState::Completed);
+                }
                 self.emit(WorldEventKind::ObjectUseCompleted {
                     resident,
                     object: active.object,
@@ -767,8 +980,12 @@ impl Simulation {
                     slot: affordance.slot.clone(),
                     capability: affordance.capability,
                     ticks_remaining: affordance.duration_ticks.max(1),
+                    player_task: request.player_task,
                 },
             );
+            if let Some(task) = request.player_task {
+                self.player_tasks.insert(task, PlayerTaskState::Active);
+            }
             self.emit(WorldEventKind::ObjectUseStarted {
                 resident: request.resident,
                 object: request.object,
@@ -1380,6 +1597,7 @@ mod tests {
             affordance: affordance.clone(),
             priority,
             request_age,
+            player_task: None,
         };
 
         assert_eq!(
@@ -1412,5 +1630,165 @@ mod tests {
             simulation.object_slot_claimant(&toilet, &slot),
             Some(SimId(2))
         );
+    }
+
+    #[test]
+    fn player_command_is_validated_next_tick_and_receipt_is_deferred() {
+        let mut simulation = load_simulation();
+        let (toilet, affordance, slot) = toilet_ids();
+        let task = PlayerTaskId(41);
+
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task,
+            resident: SimId(1),
+            object: toilet.clone(),
+            affordance: affordance.clone(),
+            priority: 3,
+        });
+        assert_eq!(simulation.object_slot_claimant(&toilet, &slot), None);
+        assert!(simulation.ingested_events().is_empty());
+
+        simulation.advance_tick();
+        assert_eq!(
+            simulation.object_slot_claimant(&toilet, &slot),
+            Some(SimId(1))
+        );
+        assert!(simulation.ingested_events().is_empty());
+        assert!(
+            simulation
+                .event_ledger()
+                .iter()
+                .any(|event| { event.kind == WorldEventKind::PlayerCommandAccepted { task } })
+        );
+
+        simulation.advance_tick();
+        assert!(
+            simulation
+                .ingested_events()
+                .iter()
+                .any(|event| { event.kind == WorldEventKind::PlayerCommandAccepted { task } })
+        );
+    }
+
+    #[test]
+    fn invalid_player_command_is_rejected_without_claims() {
+        let mut simulation = load_simulation();
+        let (_, affordance, slot) = toilet_ids();
+        let task = PlayerTaskId(42);
+        let invalid_object = DefinitionId::new("object.missing_toilet");
+
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task,
+            resident: SimId(1),
+            object: invalid_object,
+            affordance,
+            priority: 0,
+        });
+        simulation.advance_tick();
+
+        assert_eq!(
+            simulation.object_slot_claimant(&DefinitionId::new("object.cottage_toilet"), &slot),
+            None
+        );
+        assert_eq!(
+            simulation.capability_claimant(SimId(1), Capability::Hands),
+            None
+        );
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::PlayerCommandRejected {
+                    task,
+                    reason: PlayerCommandRejection::InvalidUseTarget,
+                }
+        }));
+    }
+
+    #[test]
+    fn cancelling_an_active_player_task_releases_claims_without_completion() {
+        let mut simulation = load_simulation();
+        let (toilet, affordance, slot) = toilet_ids();
+        let task = PlayerTaskId(43);
+
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task,
+            resident: SimId(1),
+            object: toilet.clone(),
+            affordance: affordance.clone(),
+            priority: 0,
+        });
+        simulation.advance_tick();
+        assert_eq!(
+            simulation.object_slot_claimant(&toilet, &slot),
+            Some(SimId(1))
+        );
+        assert_eq!(
+            simulation.capability_claimant(SimId(1), Capability::Hands),
+            Some(toilet.clone())
+        );
+
+        simulation.submit_player_command(PlayerCommand::CancelPlayerTask { task });
+        simulation.advance_tick();
+
+        assert_eq!(simulation.object_slot_claimant(&toilet, &slot), None);
+        assert_eq!(
+            simulation.capability_claimant(SimId(1), Capability::Hands),
+            None
+        );
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::TaskCancelled {
+                    task,
+                    resident: SimId(1),
+                    object: toilet.clone(),
+                    affordance: affordance.clone(),
+                }
+        }));
+        assert!(!simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::ObjectUseCompleted {
+                    resident: SimId(1),
+                    object: toilet.clone(),
+                    affordance: affordance.clone(),
+                }
+        }));
+
+        simulation.advance_tick();
+        assert!(simulation.ingested_events().iter().any(|event| {
+            event.kind
+                == WorldEventKind::TaskCancelled {
+                    task,
+                    resident: SimId(1),
+                    object: toilet.clone(),
+                    affordance: affordance.clone(),
+                }
+        }));
+    }
+
+    #[test]
+    fn queued_player_task_can_be_cancelled_before_execution() {
+        let mut simulation = load_simulation();
+        let (toilet, affordance, slot) = toilet_ids();
+        let task = PlayerTaskId(44);
+
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task,
+            resident: SimId(1),
+            object: toilet.clone(),
+            affordance: affordance.clone(),
+            priority: 0,
+        });
+        simulation.submit_player_command(PlayerCommand::CancelPlayerTask { task });
+        simulation.advance_tick();
+
+        assert_eq!(simulation.object_slot_claimant(&toilet, &slot), None);
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::TaskCancelled {
+                    task,
+                    resident: SimId(1),
+                    object: toilet.clone(),
+                    affordance: affordance.clone(),
+                }
+        }));
     }
 }

@@ -137,11 +137,14 @@ entities:
 
   - component: player-command-boundary
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Player Command Boundary
-      summary: The client submits typed household commands to the simulation inbox; next-tick validation accepts or rejects them, and accepted orders use ordinary AI planning and execution.
+      summary: The simulation now ingests typed QueueUseToilet and CancelPlayerTask commands on the next tick. Stable caller task IDs receive deferred accepted or rejected receipts; cancellation at the next atomic safe boundary releases the live object slot and hands capability, then emits TaskCancelled instead of completion. Wider household queue modes and ordinary AI plan routing remain later work.
       references: [agent-autonomy, village-client]
+    implementation:
+      status: declared
+      paths: [crates/village_sim/src/lib.rs]
 
   - component: simulation-persistence
     core:

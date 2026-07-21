@@ -56,6 +56,17 @@ entities:
       summary: Two newcomers spawn in the cottage, traverse floors, contend for one object, execute and cancel a queued player order safely, and emit asserted semantic events. Re-running the seed produces the same sequence.
       references: [scenario-test-harness, cottage-map-and-portals, cottage-household, cottage-needs-and-affordances]
 
+  - component: cottage-player-order-cancellation
+    core:
+      status: implemented
+      confidence: confirmed
+      title: Deferred Player Toilet Order and Cancellation
+      summary: The Cottage fixture accepts a typed QueueUseToilet command at the following tick, returns immutable accepted or rejected receipts on the normal deferred-event path, and cancels active or queued player tasks at their atomic safe boundary. Active cancellation releases the toilet slot and hands claim before TaskCancelled is published.
+      references: [player-command-boundary, cottage-needs-and-affordances, cottage-contention-test]
+    implementation:
+      status: declared
+      paths: [crates/village_sim/src/lib.rs]
+
   - component: cottage-playable-client
     core:
       status: proposed
