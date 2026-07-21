@@ -28,22 +28,25 @@ entities:
 
   - component: cottage-needs-and-affordances
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Cottage Needs and Affordances
-      summary: Initial household interactions cover bed, toilet, shower, sink, heater or boiler, fridge, cooker, table and chair, sofa, boxes, cupboard, and door; only the smallest set needed by the checkpoint must be implemented first.
+      summary: "The first interaction is a data-defined contested toilet: its authored affordance claims a named slot and hands only while executing. The remaining household interactions and need motivation remain later MVP work."
       references: [smart-objects, initial-needs-and-recipes]
+    implementation:
+      status: declared
+      paths: [crates/village_sim/src/lib.rs, assets/content/objects/cottage.ron]
 
   - component: cottage-content-fixture
     core:
       status: implemented
       confidence: confirmed
       title: Cottage Content Fixture
-      summary: Shared RON content currently defines the Cottage Arrival scenario, two named newcomers, a fixed seed, starting placements, and a compact two-floor map. Items, object definitions, conducts, and plans are introduced by later MVP slices.
+      summary: Shared RON content currently defines the Cottage Arrival scenario, two named newcomers, a fixed seed, starting placements, a compact two-floor map, and a placed toilet object. Items, conducts, and plans are introduced by later MVP slices.
       references: [content-registry, cottage-arrival-scenario]
     implementation:
       status: declared
-      paths: [assets/content/scenarios/cottage_arrival.ron, assets/content/people/newcomers.ron, assets/content/maps/cottage.ron]
+      paths: [assets/content/scenarios/cottage_arrival.ron, assets/content/people/newcomers.ron, assets/content/maps/cottage.ron, assets/content/objects/cottage.ron]
 
   - component: cottage-contention-test
     core:

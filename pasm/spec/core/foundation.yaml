@@ -77,19 +77,25 @@ entities:
 
   - component: capability-arbitration
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Capability and Slot Arbitration
-      summary: Atomic actions claim locomotion, hands, voice, attention, posture, social presence, and object slots by priority, request age, then SimId, enabling compatible concurrency.
+      summary: The first primitive action claims its hands capability and an object slot only while executing. Same-tick contested claims resolve by priority, request age, then SimId; the remaining capabilities are later work.
       references: [smart-objects, tile-navigation]
+    implementation:
+      status: declared
+      paths: [crates/village_sim/src/lib.rs, assets/content/objects/cottage.ron]
 
   - component: smart-objects
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Smart Objects and Physical Items
-      summary: Data-defined objects expose affordances, slots, and storage; containers hold item stacks while individually significant held or placed things become entities.
+      summary: The Cottage fixture loads a data-defined toilet with an authored type, placement, exclusive slot, and duration-based hands affordance. Storage and item entities remain later work.
       references: [content-registry, capability-arbitration]
+    implementation:
+      status: declared
+      paths: [crates/village_sim/src/lib.rs, assets/content/objects/cottage.ron, assets/content/scenarios/cottage_arrival.ron]
 
   - component: tile-navigation
     core:
@@ -123,11 +129,11 @@ entities:
       status: implemented
       confidence: confirmed
       title: Validated Content Registry
-      summary: Shared workspace RON assets currently define the Cottage Arrival scenario and people, loaded through typed Rust definitions. Maps, objects, items, recipes, plans, and conducts are planned content domains.
+      summary: Shared workspace RON assets currently define the Cottage Arrival scenario, people, map, and placed smart objects, loaded through typed Rust definitions. Items, recipes, plans, and conducts are planned content domains.
       references: [cottage-arrival-scenario]
     implementation:
       status: declared
-      paths: [crates/village_sim/src/lib.rs, assets/content/scenarios/cottage_arrival.ron, assets/content/people/newcomers.ron]
+      paths: [crates/village_sim/src/lib.rs, assets/content/scenarios/cottage_arrival.ron, assets/content/people/newcomers.ron, assets/content/objects/cottage.ron]
 
   - component: player-command-boundary
     core:

@@ -1,0 +1,18 @@
+(
+    objects: [
+        (
+            id: "object.cottage_toilet",
+            object_type: "object_type.toilet",
+            position: (floor: 0, x: 3, y: 2),
+            slots: [(id: "slot.use")],
+            affordances: [
+                (
+                    id: "affordance.use_toilet",
+                    slot: "slot.use",
+                    capability: Hands,
+                    duration_ticks: 1,
+                ),
+            ],
+        ),
+    ],
+)

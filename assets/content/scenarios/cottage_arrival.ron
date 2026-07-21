@@ -6,6 +6,7 @@
         "person.newcomer_b",
     ],
     map: "map.cottage",
+    objects: ["object.cottage_toilet"],
     placements: [
         (person: "person.newcomer_a", position: (floor: 0, x: 1, y: 1)),
         (person: "person.newcomer_b", position: (floor: 0, x: 2, y: 2)),

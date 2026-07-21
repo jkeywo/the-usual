@@ -7,7 +7,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     fs,
     path::Path,
 };
@@ -57,6 +57,7 @@ pub struct ScenarioDefinition {
     pub seed: u64,
     pub people: Vec<DefinitionId>,
     pub map: DefinitionId,
+    pub objects: Vec<DefinitionId>,
     pub placements: Vec<ResidentPlacement>,
 }
 
@@ -102,12 +103,50 @@ pub struct MapAsset {
     pub portals: Vec<PortalDefinition>,
 }
 
+/// A capability exclusively used by a primitive while it is executing.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum Capability {
+    Hands,
+}
+
+/// A named, exclusive slot on a smart object.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ObjectSlotDefinition {
+    pub id: DefinitionId,
+}
+
+/// One executable interaction exposed by a data-defined smart object.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ObjectAffordanceDefinition {
+    pub id: DefinitionId,
+    pub slot: DefinitionId,
+    pub capability: Capability,
+    pub duration_ticks: u8,
+}
+
+/// An object instance placed in the authored map.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SmartObjectDefinition {
+    pub id: DefinitionId,
+    pub object_type: DefinitionId,
+    pub position: TilePosition,
+    pub slots: Vec<ObjectSlotDefinition>,
+    pub affordances: Vec<ObjectAffordanceDefinition>,
+}
+
+/// All smart object instances loaded for one scenario.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ObjectsAsset {
+    pub objects: Vec<SmartObjectDefinition>,
+}
+
 /// The content required to construct a scenario runner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScenarioContent {
     pub scenario: ScenarioDefinition,
     pub people: PeopleAsset,
     pub map: MapAsset,
+    pub objects: ObjectsAsset,
 }
 
 impl ScenarioContent {
@@ -117,10 +156,12 @@ impl ScenarioContent {
         let scenario = load_ron(content_root.join("scenarios/cottage_arrival.ron"))?;
         let people = load_ron(content_root.join("people/newcomers.ron"))?;
         let map = load_ron(content_root.join("maps/cottage.ron"))?;
+        let objects = load_ron(content_root.join("objects/cottage.ron"))?;
         Ok(Self {
             scenario,
             people,
             map,
+            objects,
         })
     }
 }
@@ -161,6 +202,8 @@ pub enum ContentError {
     },
     #[error("scenario is missing a placement for person definition {0:?}")]
     MissingPlacement(DefinitionId),
+    #[error("scenario references missing object definition {0:?}")]
+    MissingObject(DefinitionId),
     #[error("placement for {person:?} is not a walkable map tile: {position:?}")]
     InvalidPlacement {
         person: DefinitionId,
@@ -191,6 +234,8 @@ struct GoToState {
     path: Vec<TilePosition>,
     next_step: usize,
     traversal: Option<PortalTraversal>,
+    priority: i32,
+    request_age: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -198,6 +243,50 @@ struct PortalTraversal {
     portal: DefinitionId,
     destination: TilePosition,
     ticks_remaining: u8,
+}
+
+#[derive(Clone, Debug)]
+struct UseRequest {
+    resident: SimId,
+    object: DefinitionId,
+    affordance: DefinitionId,
+    priority: i32,
+    request_age: u64,
+}
+
+/// One live claim to enter a tile this tick. Movement makes the same
+/// deterministic arbitration promise as smart-object slots.
+#[derive(Clone, Copy, Debug)]
+struct MovementClaim {
+    resident: SimId,
+    target: TilePosition,
+    priority: i32,
+    request_age: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveObjectUse {
+    object: DefinitionId,
+    affordance: DefinitionId,
+    slot: DefinitionId,
+    capability: Capability,
+    ticks_remaining: u8,
+}
+
+fn compare_use_requests(left: &UseRequest, right: &UseRequest) -> std::cmp::Ordering {
+    right
+        .priority
+        .cmp(&left.priority)
+        .then_with(|| left.request_age.cmp(&right.request_age))
+        .then_with(|| left.resident.cmp(&right.resident))
+}
+
+fn compare_movement_claims(left: &MovementClaim, right: &MovementClaim) -> std::cmp::Ordering {
+    right
+        .priority
+        .cmp(&left.priority)
+        .then_with(|| left.request_age.cmp(&right.request_age))
+        .then_with(|| left.resident.cmp(&right.resident))
 }
 
 /// Immutable outcome emitted by the authoritative simulation.
@@ -229,6 +318,22 @@ pub enum WorldEventKind {
         resident: SimId,
         destination: TilePosition,
     },
+    ObjectUseStarted {
+        resident: SimId,
+        object: DefinitionId,
+        affordance: DefinitionId,
+    },
+    ObjectUseWaited {
+        resident: SimId,
+        object: DefinitionId,
+        affordance: DefinitionId,
+        blocked_by: SimId,
+    },
+    ObjectUseCompleted {
+        resident: SimId,
+        object: DefinitionId,
+        affordance: DefinitionId,
+    },
 }
 
 fn keyed_draw(seed: u64, tick: u64, event_id: u64, purpose: u64) -> u64 {
@@ -254,9 +359,14 @@ pub struct Simulation {
     next_sim_id: u64,
     residents: BTreeMap<SimId, Entity>,
     map: MapAsset,
+    objects: BTreeMap<DefinitionId, SmartObjectDefinition>,
     occupancy: BTreeMap<TilePosition, SimId>,
     portal_occupancy: BTreeMap<DefinitionId, SimId>,
     go_to: BTreeMap<SimId, GoToState>,
+    use_requests: Vec<UseRequest>,
+    active_object_uses: BTreeMap<SimId, ActiveObjectUse>,
+    object_slot_claims: BTreeMap<(DefinitionId, DefinitionId), SimId>,
+    capability_claims: BTreeMap<(SimId, Capability), DefinitionId>,
     pending_events: Vec<WorldEvent>,
     ingested_events: Vec<WorldEvent>,
     event_ledger: Vec<WorldEvent>,
@@ -279,6 +389,18 @@ impl Simulation {
             });
         }
 
+        let objects = content
+            .objects
+            .objects
+            .into_iter()
+            .map(|object| (object.id.clone(), object))
+            .collect::<BTreeMap<_, _>>();
+        for object_id in &content.scenario.objects {
+            if !objects.contains_key(object_id) {
+                return Err(ContentError::MissingObject(object_id.clone()));
+            }
+        }
+
         let mut simulation = Self {
             world: World::new(),
             seed: content.scenario.seed,
@@ -286,9 +408,14 @@ impl Simulation {
             next_sim_id: 1,
             residents: BTreeMap::new(),
             map: content.map,
+            objects,
             occupancy: BTreeMap::new(),
             portal_occupancy: BTreeMap::new(),
             go_to: BTreeMap::new(),
+            use_requests: Vec::new(),
+            active_object_uses: BTreeMap::new(),
+            object_slot_claims: BTreeMap::new(),
+            capability_claims: BTreeMap::new(),
             pending_events: Vec::new(),
             ingested_events: Vec::new(),
             event_ledger: Vec::new(),
@@ -396,6 +523,18 @@ impl Simulation {
     /// Starts a narrow navigation task. It plans immediately but claims no
     /// future tiles or portals; each next step is resolved against live state.
     pub fn begin_go_to(&mut self, resident: SimId, destination: TilePosition) -> bool {
+        self.begin_go_to_with_priority(resident, destination, 0)
+    }
+
+    /// Starts navigation with an explicit claim priority. When multiple
+    /// residents approach the same live tile in one tick, higher priority,
+    /// then the older request, then lower `SimId` gets the tile.
+    pub fn begin_go_to_with_priority(
+        &mut self,
+        resident: SimId,
+        destination: TilePosition,
+        priority: i32,
+    ) -> bool {
         let Some(origin) = self.resident_position(resident) else {
             return false;
         };
@@ -407,9 +546,72 @@ impl Simulation {
                 path,
                 next_step: 1,
                 traversal: None,
+                priority,
+                request_age: self.tick,
             },
         );
         true
+    }
+
+    /// Requests an object affordance. Requests are deliberately claim-free:
+    /// slots and capabilities are acquired only during the execution phase of
+    /// a later tick.
+    pub fn begin_use_object(
+        &mut self,
+        resident: SimId,
+        object: &DefinitionId,
+        affordance: &DefinitionId,
+        priority: i32,
+    ) -> bool {
+        if !self.residents.contains_key(&resident)
+            || self.active_object_uses.contains_key(&resident)
+            || self
+                .use_requests
+                .iter()
+                .any(|request| request.resident == resident)
+        {
+            return false;
+        }
+        let Some(object_definition) = self.objects.get(object) else {
+            return false;
+        };
+        if !object_definition
+            .affordances
+            .iter()
+            .any(|candidate| candidate.id == *affordance)
+        {
+            return false;
+        }
+        self.use_requests.push(UseRequest {
+            resident,
+            object: object.clone(),
+            affordance: affordance.clone(),
+            priority,
+            request_age: self.tick,
+        });
+        true
+    }
+
+    /// Returns the resident currently executing in a named smart-object slot.
+    #[must_use]
+    pub fn object_slot_claimant(
+        &self,
+        object: &DefinitionId,
+        slot: &DefinitionId,
+    ) -> Option<SimId> {
+        self.object_slot_claims
+            .get(&(object.clone(), slot.clone()))
+            .copied()
+    }
+
+    /// Returns whether an executing primitive currently claims a capability.
+    #[must_use]
+    pub fn capability_claimant(
+        &self,
+        resident: SimId,
+        capability: Capability,
+    ) -> Option<DefinitionId> {
+        self.capability_claims.get(&(resident, capability)).cloned()
     }
 
     /// Consumes exactly one deterministic 250 ms simulation tick.
@@ -421,6 +623,7 @@ impl Simulation {
         self.tick += 1;
 
         self.tick_go_to();
+        self.tick_object_uses();
 
         let event = WorldEvent {
             tick: self.tick,
@@ -433,9 +636,144 @@ impl Simulation {
     }
 
     fn tick_go_to(&mut self) {
+        let mut claims = self
+            .go_to
+            .iter()
+            .filter_map(|(resident, state)| {
+                if state.traversal.is_some() {
+                    return None;
+                }
+                let origin = self.resident_position(*resident)?;
+                let target = state.path.get(state.next_step).copied()?;
+                if self.occupancy.contains_key(&target)
+                    || self
+                        .portal_between(origin, target)
+                        .is_some_and(|portal| self.portal_occupancy.contains_key(&portal.id))
+                {
+                    return None;
+                }
+                Some(MovementClaim {
+                    resident: *resident,
+                    target,
+                    priority: state.priority,
+                    request_age: state.request_age,
+                })
+            })
+            .collect::<Vec<_>>();
+        claims.sort_by(|left, right| {
+            left.target
+                .cmp(&right.target)
+                .then_with(|| compare_movement_claims(left, right))
+        });
+
+        let mut approved = BTreeSet::new();
+        let mut waited = BTreeMap::new();
+        for claim in claims {
+            if let Some(winner) = approved.iter().copied().find(|winner| {
+                self.go_to
+                    .get(winner)
+                    .is_some_and(|state| state.path.get(state.next_step) == Some(&claim.target))
+            }) {
+                waited.insert(claim.resident, (winner, claim.target));
+            } else {
+                approved.insert(claim.resident);
+            }
+        }
+
         let residents = self.go_to.keys().copied().collect::<Vec<_>>();
-        for resident in residents {
+        let mut processed = BTreeSet::new();
+        for resident in approved {
             self.tick_one_go_to(resident);
+            processed.insert(resident);
+        }
+        for resident in residents {
+            if processed.contains(&resident) {
+                continue;
+            }
+            if let Some((blocked_by, position)) = waited.get(&resident).copied() {
+                self.emit(WorldEventKind::GoToWaited {
+                    resident,
+                    blocked_by,
+                    position,
+                });
+            } else {
+                self.tick_one_go_to(resident);
+            }
+        }
+    }
+
+    fn tick_object_uses(&mut self) {
+        let active_residents = self.active_object_uses.keys().copied().collect::<Vec<_>>();
+        for resident in active_residents {
+            let mut active = self
+                .active_object_uses
+                .remove(&resident)
+                .expect("active resident was collected from active uses");
+            active.ticks_remaining = active.ticks_remaining.saturating_sub(1);
+            if active.ticks_remaining == 0 {
+                self.object_slot_claims
+                    .remove(&(active.object.clone(), active.slot.clone()));
+                self.capability_claims
+                    .remove(&(resident, active.capability));
+                self.emit(WorldEventKind::ObjectUseCompleted {
+                    resident,
+                    object: active.object,
+                    affordance: active.affordance,
+                });
+            } else {
+                self.active_object_uses.insert(resident, active);
+            }
+        }
+
+        self.use_requests.sort_by(compare_use_requests);
+        let requests = std::mem::take(&mut self.use_requests);
+        for request in requests {
+            let Some(object) = self.objects.get(&request.object) else {
+                continue;
+            };
+            let Some(affordance) = object
+                .affordances
+                .iter()
+                .find(|candidate| candidate.id == request.affordance)
+            else {
+                continue;
+            };
+            let slot_key = (request.object.clone(), affordance.slot.clone());
+            let capability_key = (request.resident, affordance.capability);
+            let blocked_by = self.object_slot_claims.get(&slot_key).copied().or_else(|| {
+                self.capability_claims
+                    .get(&capability_key)
+                    .map(|_| request.resident)
+            });
+            if let Some(blocked_by) = blocked_by {
+                self.emit(WorldEventKind::ObjectUseWaited {
+                    resident: request.resident,
+                    object: request.object.clone(),
+                    affordance: request.affordance.clone(),
+                    blocked_by,
+                });
+                self.use_requests.push(request);
+                continue;
+            }
+
+            self.object_slot_claims.insert(slot_key, request.resident);
+            self.capability_claims
+                .insert(capability_key, request.object.clone());
+            self.active_object_uses.insert(
+                request.resident,
+                ActiveObjectUse {
+                    object: request.object.clone(),
+                    affordance: request.affordance.clone(),
+                    slot: affordance.slot.clone(),
+                    capability: affordance.capability,
+                    ticks_remaining: affordance.duration_ticks.max(1),
+                },
+            );
+            self.emit(WorldEventKind::ObjectUseStarted {
+                resident: request.resident,
+                object: request.object,
+                affordance: request.affordance,
+            });
         }
     }
 
@@ -835,6 +1173,116 @@ mod tests {
     }
 
     #[test]
+    fn higher_priority_approach_claim_wins_a_shared_live_tile() {
+        let mut simulation = load_simulation();
+        let target = TilePosition {
+            floor: 0,
+            x: 2,
+            y: 1,
+        };
+
+        assert!(simulation.begin_go_to_with_priority(SimId(1), target, 1));
+        assert!(simulation.begin_go_to_with_priority(SimId(2), target, 2));
+        simulation.advance_tick();
+
+        assert_eq!(
+            simulation.resident_position(SimId(1)),
+            Some(TilePosition {
+                floor: 0,
+                x: 1,
+                y: 1,
+            })
+        );
+        assert_eq!(simulation.resident_position(SimId(2)), Some(target));
+        simulation.advance_tick();
+        assert!(simulation.ingested_events().iter().any(|event| {
+            event.kind
+                == WorldEventKind::GoToWaited {
+                    resident: SimId(1),
+                    blocked_by: SimId(2),
+                    position: target,
+                }
+        }));
+    }
+
+    #[test]
+    fn lower_sim_id_wins_an_equal_priority_and_age_shared_live_tile_claim() {
+        let mut simulation = load_simulation();
+        let target = TilePosition {
+            floor: 0,
+            x: 2,
+            y: 1,
+        };
+        let lower_id = SimId(1);
+        let higher_id = SimId(2);
+
+        // Both requests start before the same tick, approach the same
+        // unoccupied tile, and deliberately have equal priority and age.
+        assert!(simulation.begin_go_to_with_priority(lower_id, target, 0));
+        assert!(simulation.begin_go_to_with_priority(higher_id, target, 0));
+        simulation.advance_tick();
+
+        assert_eq!(simulation.resident_position(lower_id), Some(target));
+        assert_eq!(
+            simulation.resident_position(higher_id),
+            Some(TilePosition {
+                floor: 0,
+                x: 2,
+                y: 2,
+            })
+        );
+        simulation.advance_tick();
+        assert!(simulation.ingested_events().iter().any(|event| {
+            event.kind
+                == WorldEventKind::GoToWaited {
+                    resident: higher_id,
+                    blocked_by: lower_id,
+                    position: target,
+                }
+        }));
+    }
+
+    #[test]
+    fn older_approach_claim_wins_a_shared_live_tile_before_sim_id() {
+        let mut simulation = load_simulation();
+        let target = TilePosition {
+            floor: 0,
+            x: 2,
+            y: 1,
+        };
+
+        assert!(simulation.begin_go_to(SimId(1), target));
+        assert!(simulation.begin_go_to(SimId(2), target));
+        // Keep both approaches in the same contention tick while modelling a
+        // newer request from resident 1 and an older request from resident 2.
+        simulation
+            .go_to
+            .get_mut(&SimId(1))
+            .expect("first resident has a navigation request")
+            .request_age = simulation.tick + 1;
+        simulation.advance_tick();
+
+        assert_eq!(
+            simulation.resident_position(SimId(1)),
+            Some(TilePosition {
+                floor: 0,
+                x: 1,
+                y: 1,
+            })
+        );
+        assert_eq!(simulation.resident_position(SimId(2)), Some(target));
+        simulation.advance_tick();
+        assert!(simulation.ingested_events().iter().any(|event| {
+            event.kind
+                == WorldEventKind::GoToWaited {
+                    resident: SimId(1),
+                    blocked_by: SimId(2),
+                    position: target,
+                }
+        }));
+    }
+
+    #[test]
     fn impossible_go_to_emits_a_semantic_failure() {
         let mut simulation = load_simulation();
         let resident = SimId(1);
@@ -855,5 +1303,114 @@ mod tests {
                     destination,
                 }
         }));
+    }
+
+    fn toilet_ids() -> (DefinitionId, DefinitionId, DefinitionId) {
+        (
+            DefinitionId::new("object.cottage_toilet"),
+            DefinitionId::new("affordance.use_toilet"),
+            DefinitionId::new("slot.use"),
+        )
+    }
+
+    #[test]
+    fn object_requests_do_not_claim_a_slot_or_capability_before_execution() {
+        let mut simulation = load_simulation();
+        let (toilet, affordance, slot) = toilet_ids();
+
+        assert!(simulation.begin_use_object(SimId(1), &toilet, &affordance, 0));
+        assert_eq!(simulation.object_slot_claimant(&toilet, &slot), None);
+        assert_eq!(
+            simulation.capability_claimant(SimId(1), Capability::Hands),
+            None
+        );
+    }
+
+    #[test]
+    fn contested_toilet_waits_then_retries_after_execution_releases_claims() {
+        let mut simulation = load_simulation();
+        let (toilet, affordance, slot) = toilet_ids();
+        let first = SimId(1);
+        let second = SimId(2);
+
+        assert!(simulation.begin_use_object(first, &toilet, &affordance, 0));
+        assert!(simulation.begin_use_object(second, &toilet, &affordance, 0));
+        simulation.advance_tick();
+
+        assert_eq!(simulation.object_slot_claimant(&toilet, &slot), Some(first));
+        assert_eq!(
+            simulation.capability_claimant(first, Capability::Hands),
+            Some(toilet.clone())
+        );
+        assert_eq!(
+            simulation.capability_claimant(second, Capability::Hands),
+            None
+        );
+
+        simulation.advance_tick();
+        assert!(simulation.ingested_events().iter().any(|event| {
+            event.kind
+                == WorldEventKind::ObjectUseWaited {
+                    resident: second,
+                    object: toilet.clone(),
+                    affordance: affordance.clone(),
+                    blocked_by: first,
+                }
+        }));
+        assert_eq!(
+            simulation.object_slot_claimant(&toilet, &slot),
+            Some(second)
+        );
+        assert_eq!(
+            simulation.capability_claimant(first, Capability::Hands),
+            None
+        );
+        assert_eq!(
+            simulation.capability_claimant(second, Capability::Hands),
+            Some(toilet)
+        );
+    }
+
+    #[test]
+    fn object_claim_order_is_priority_then_request_age_then_sim_id() {
+        let (toilet, affordance, _) = toilet_ids();
+        let request = |resident, priority, request_age| UseRequest {
+            resident,
+            object: toilet.clone(),
+            affordance: affordance.clone(),
+            priority,
+            request_age,
+        };
+
+        assert_eq!(
+            compare_use_requests(&request(SimId(2), 2, 9), &request(SimId(1), 1, 1)),
+            std::cmp::Ordering::Less,
+            "higher priority wins"
+        );
+        assert_eq!(
+            compare_use_requests(&request(SimId(2), 1, 3), &request(SimId(1), 1, 4)),
+            std::cmp::Ordering::Less,
+            "older request wins equal priority"
+        );
+        assert_eq!(
+            compare_use_requests(&request(SimId(1), 1, 3), &request(SimId(2), 1, 3)),
+            std::cmp::Ordering::Less,
+            "lower SimId wins a complete tie"
+        );
+    }
+
+    #[test]
+    fn higher_priority_request_wins_the_same_tick_contention() {
+        let mut simulation = load_simulation();
+        let (toilet, affordance, slot) = toilet_ids();
+
+        assert!(simulation.begin_use_object(SimId(1), &toilet, &affordance, 1));
+        assert!(simulation.begin_use_object(SimId(2), &toilet, &affordance, 2));
+        simulation.advance_tick();
+
+        assert_eq!(
+            simulation.object_slot_claimant(&toilet, &slot),
+            Some(SimId(2))
+        );
     }
 }
