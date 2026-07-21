@@ -93,11 +93,14 @@ entities:
 
   - component: tile-navigation
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Layered Tile Navigation
-      summary: A* pathfinding over layered square tiles with one-person live occupancy by default and occupiable door and stair portals; no future movement reservation exists.
+      summary: The Cottage fixture now provides A* GoTo paths over layered square tiles, one-person live occupancy, and a paired occupiable stair portal. Paths do not reserve future tiles; dynamic rerouting and doors remain later work.
       references: [capability-arbitration, cottage-arrival-scenario]
+    implementation:
+      status: declared
+      paths: [crates/village_sim/src/lib.rs, assets/content/maps/cottage.ron]
 
   - component: social-consequences
     core:

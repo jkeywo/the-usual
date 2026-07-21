@@ -1,0 +1,15 @@
+(
+    id: "map.cottage",
+    floors: [
+        (floor: 0, width: 32, height: 24, blocked: []),
+        (floor: 1, width: 32, height: 24, blocked: []),
+    ],
+    portals: [
+        (
+            id: "portal.cottage_stairs",
+            from: (floor: 0, x: 5, y: 5),
+            to: (floor: 1, x: 5, y: 5),
+            traversal_ticks: 1,
+        ),
+    ],
+)

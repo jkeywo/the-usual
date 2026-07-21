@@ -9,11 +9,14 @@ entities:
 
   - component: cottage-map-and-portals
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Two-Storey Cottage Map
-      summary: A hand-authored 32x24-per-floor cottage has kitchen and living space downstairs, a shared bedroom and bathroom upstairs, and paired stair portals with traversal time and live occupancy.
+      summary: A hand-authored 32x24-per-floor fixture now has paired stairs with one-tick traversal and live portal occupancy. Detailed rooms and object placement remain later content work.
       references: [tile-navigation, cottage-arrival-scenario]
+    implementation:
+      status: declared
+      paths: [assets/content/maps/cottage.ron, assets/content/scenarios/cottage_arrival.ron]
 
   - component: cottage-household
     core:
@@ -36,11 +39,11 @@ entities:
       status: implemented
       confidence: confirmed
       title: Cottage Content Fixture
-      summary: Shared RON content currently defines the Cottage Arrival scenario, two named newcomers, and a fixed seed. The map, items, object definitions, conducts, and plans are introduced by later MVP slices.
+      summary: Shared RON content currently defines the Cottage Arrival scenario, two named newcomers, a fixed seed, starting placements, and a compact two-floor map. Items, object definitions, conducts, and plans are introduced by later MVP slices.
       references: [content-registry, cottage-arrival-scenario]
     implementation:
       status: declared
-      paths: [assets/content/scenarios/cottage_arrival.ron, assets/content/people/newcomers.ron]
+      paths: [assets/content/scenarios/cottage_arrival.ron, assets/content/people/newcomers.ron, assets/content/maps/cottage.ron]
 
   - component: cottage-contention-test
     core:
