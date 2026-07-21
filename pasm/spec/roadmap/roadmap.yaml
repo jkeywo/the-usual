@@ -1,0 +1,40 @@
+entities:
+  - system: implementation-roadmap
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Implementation Roadmap
+      summary: Build one small, deterministic household story before extending places, social history, initiatives, or village scale.
+      references: [cottage-arrival-mvp, milestone-2-first-friday, milestone-3-social-persistence, milestone-4-village-initiatives]
+
+  - component: future-village-scale
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Village-Scale Simulation
+      summary: A later target of roughly 50 to 80 residents, additional homes and institutions, routines, work, and a wider social graph. It is not a requirement for the First Friday scenario.
+      references: [initiative-system, social-consequences]
+
+  - component: future-economy-and-jobs
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Economy, Jobs, and Household Material Life
+      summary: Shop economy, money, jobs, repairs, and stronger household consequences are deferred until the domestic loop is compelling.
+      references: [smart-objects, agent-autonomy]
+
+  - component: future-weather-vehicles-and-families
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Weather, Vehicles, Children, and Pets
+      summary: Weather, cars, children, pets, and richer institutional schedules remain future content and must not shape the MVP architecture prematurely.
+      references: [future-village-scale]
+
+  - component: future-finished-art-and-audio
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Finished Art and Audio
+      summary: Finished art, animation breadth, dialogue, localisation, and audio follow a proven playable domestic and social loop; placeholders are sufficient until then.
+      references: [pixel-art-presentation]

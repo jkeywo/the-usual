@@ -1,0 +1,40 @@
+entities:
+  - system: milestone-2-first-friday
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Milestone 2 — First Friday
+      summary: Expand Cottage Arrival into one evening spanning cottage, shop, and King's Head pub. Prove invitation pressure, travel, ordinary shared-object queueing, and one witnessed social event without attempting full village scale.
+      references: [cottage-arrival-mvp, first-friday-invitation, pub-visit-and-contention, initial-social-consequences]
+
+  - component: first-friday-invitation
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Neighbour Invitation and Time-Bound Commitment
+      summary: Around 16:30 a neighbour can invite the household to a 19:00 pub quiz. The invitation creates a normal commitment or reaction candidate, never a direct override of autonomy.
+      references: [agent-autonomy, player-command-boundary]
+
+  - component: pub-visit-and-contention
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Pub Travel and Service Contention
+      summary: Household agents can navigate from cottage to pub, encounter occupied service slots without advance reservation, and wait, join a social queue, choose an alternative, or replan.
+      references: [tile-navigation, smart-objects, capability-arbitration]
+
+  - component: initial-social-consequences
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Participant and Witness Consequences
+      summary: At least one pub interaction emits a world event with distinct participant and witness perceptions and a visible household knowledge result.
+      references: [world-events, social-consequences]
+
+  - component: pub-seat-lore
+    core:
+      status: proposed
+      confidence: confirmed
+      title: The Pargeter Seat
+      summary: Sitting in the left-hand corner seat while the pub is open may provoke a tut and later a friendly warning that Mr Pargeter received the news about the pig there. It has no supernatural or need effect and requires no further explanation in this slice.
+      references: [setting-direction, initial-social-consequences]

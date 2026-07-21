@@ -1,0 +1,56 @@
+entities:
+  - system: cottage-arrival-mvp
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Cottage Arrival MVP
+      summary: A small headless vertical slice proving autonomous household behaviour, player orders, two-floor navigation, physical contention, safe cancellation, and semantic event assertions before pub or social-persistence work.
+      references: [cottage-arrival-scenario, scenario-test-harness, agent-autonomy, smart-objects, tile-navigation]
+
+  - component: cottage-map-and-portals
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Two-Storey Cottage Map
+      summary: A hand-authored 32x24-per-floor cottage has kitchen and living space downstairs, a shared bedroom and bathroom upstairs, and paired stair portals with traversal time and live occupancy.
+      references: [tile-navigation, cottage-arrival-scenario]
+
+  - component: cottage-household
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Newcomer Household
+      summary: An established adult couple begins with mutual familiarity, affection, comfort, and trust but contrasting practical/private and sociable/curious priorities. Both remain autonomous.
+      references: [agent-autonomy, cottage-arrival-scenario]
+
+  - component: cottage-needs-and-affordances
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Cottage Needs and Affordances
+      summary: Initial household interactions cover bed, toilet, shower, sink, heater or boiler, fridge, cooker, table and chair, sofa, boxes, cupboard, and door; only the smallest set needed by the checkpoint must be implemented first.
+      references: [smart-objects, initial-needs-and-recipes]
+
+  - component: cottage-content-fixture
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Cottage Content Fixture
+      summary: Shared RON content defines the Cottage Arrival scenario, map, couple, initial items, object definitions, Human conduct, initial plans, and a fixed seed.
+      references: [content-registry, cottage-arrival-scenario]
+
+  - component: cottage-contention-test
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Cottage Contention Acceptance Test
+      summary: Two newcomers spawn in the cottage, traverse floors, contend for one object, execute and cancel a queued player order safely, and emit asserted semantic events. Re-running the seed produces the same sequence.
+      references: [scenario-test-harness, cottage-map-and-portals, cottage-household, cottage-needs-and-affordances]
+
+  - component: cottage-playable-client
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Cottage Playable Client
+      summary: After the headless checkpoint, placeholder pixel art adds orthographic pan and zoom, optional selected-agent follow, agent-first order targeting, and a compact current-intention and queue card.
+      references: [village-client, player-command-boundary, pixel-art-presentation]

@@ -1,0 +1,11 @@
+[package]
+name = "village_game"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bevy.workspace = true
+village_sim = { path = "../village_sim" }

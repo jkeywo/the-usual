@@ -1,0 +1,18 @@
+[workspace]
+members = ["crates/village_sim", "crates/village_game"]
+default-members = ["crates/village_sim", "crates/village_game"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/jkeywo/the-usual"
+
+[workspace.dependencies]
+bevy = { version = "=0.18.1" }
+bevy_app = { version = "=0.18.1" }
+bevy_ecs = { version = "=0.18.1" }
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

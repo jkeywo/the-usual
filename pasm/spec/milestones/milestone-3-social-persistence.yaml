@@ -1,0 +1,40 @@
+entities:
+  - system: milestone-3-social-persistence
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Milestone 3 — Social Persistence
+      summary: Make ordinary interactions accumulate into durable personal and social consequences with knowledge-aware inspection and save/load support.
+      references: [social-memory-and-ledger, belief-and-label-model, knowledge-aware-presentation, active-plan-save-load]
+
+  - component: social-memory-and-ledger
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Moments, Memories, and Relationship Ledger
+      summary: Perceived events create temporary moments, episodic memories with salience and trait-weighted decay, and directional relationship entries across affection, trust, respect, comfort, attraction, obligation, grievance, and familiarity.
+      references: [social-consequences, simulation-persistence]
+
+  - component: belief-and-label-model
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Evidence-Backed Beliefs and Emergent Labels
+      summary: Beliefs retain evidence, confidence, and trend; they inform utility scoring. Labels emerge directionally through thresholded history with hysteresis rather than a global opinion number.
+      references: [social-consequences, agent-autonomy]
+
+  - component: knowledge-aware-presentation
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Household-Knowledge UI
+      summary: The player sees household state fully but only observes, hears, or infers NPC facts. A separate developer mode may expose omniscient simulation state.
+      references: [village-client, social-consequences]
+
+  - component: active-plan-save-load
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Active Plan Persistence
+      summary: Saving during an active plan preserves plan state, queue, memories, and relevant event context; load must restore a valid deterministic continuation.
+      references: [simulation-persistence, agent-autonomy]

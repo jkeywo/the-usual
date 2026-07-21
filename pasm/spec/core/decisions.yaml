@@ -1,0 +1,217 @@
+entities:
+  - decision: working-title-and-repository
+    core:
+      status: accepted
+      confidence: confirmed
+      title: The Usual
+      summary: The game uses the working title The Usual, the GitHub repository name `the-usual`, and the Rust crate prefix `village_` for the initial simulation and client crates.
+      references: [the-usual-runtime]
+
+  - decision: rust-and-bevy-baseline
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Rust 1.95 and Bevy 0.18.1
+      summary: Windows desktop is the initial target. Rust 1.95.0 and Bevy 0.18.1 are pinned; the Bevy 0.19 release candidate is deliberately excluded.
+      rationale: [Stable tooling gives the first prototype a dependable baseline while Bevy release changes remain substantial.]
+      references: [village-simulation, village-client]
+
+  - decision: headless-simulation-boundary
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Headless Simulation and Bevy Client Boundary
+      summary: "`village_sim` uses Bevy ECS-oriented crates only. `village_game` owns full Bevy integration, rendering, input, UI, and audio."
+      references: [village-simulation, village-client]
+
+  - decision: deterministic-tick-and-phase-order
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Fixed 250 ms Tick and Explicit Schedule
+      summary: Pause, 1x, 4x, and 16x alter tick consumption but never semantics. Each tick runs ingest orders/events, update world and needs, choose/revise plans, allocate capabilities, tick atomic actions, then resolve and publish events.
+      references: [tick-driver, world-events]
+
+  - decision: deferred-event-observability
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Next-Tick Event Observability
+      summary: Actions publish immutable events at a tick's end and all systems consume them only in the next tick's ingest phase.
+      references: [world-events, tick-driver]
+
+  - decision: keyed-deterministic-randomness
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Keyed Deterministic Randomness
+      summary: Stateless random draws derive from world seed, tick, event id, and purpose so unrelated changes do not advance a shared stream or reshuffle outcomes.
+      references: [village-simulation, world-events]
+
+  - decision: authored-and-runtime-identities
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Readable Definitions and Persistent SimIds
+      summary: Authored definitions use readable keys; spawned instances receive monotonic SimId values persisted in saves and events. Bevy Entity remains an implementation detail.
+      references: [content-registry, simulation-persistence]
+
+  - decision: tiled-spatial-model
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Layered Grid with Live Occupancy
+      summary: A layered square-tile grid uses A* paths. Doors and stairs are explicit occupiable portals; ordinary tiles have one-person live capacity, with no advance reservation.
+      references: [tile-navigation]
+
+  - decision: physical-item-model
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Spatial Stacks and Significant Entities
+      summary: Containers store typed item stacks. Held, placed, or otherwise individually significant items become world entities; generic supplies remain stacks.
+      references: [smart-objects]
+
+  - decision: smart-object-execution-contract
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Execution-Time Smart Object Claims
+      summary: Object definitions expose named slots, storage, and affordances. Affordances expand into plan methods and claim their slots only while executing.
+      references: [smart-objects, plan-library]
+
+  - decision: deterministic-claim-arbitration
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Claim Arbitration
+      summary: Simultaneous capability and object claims resolve by submitted priority, request age, then requester SimId. Conduct and social rules may affect priority but not deterministic tie-breaking.
+      references: [capability-arbitration]
+
+  - decision: safe-boundary-cancellation
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Safe-Boundary Cancellation
+      summary: Cancellation is requested for the next tick. A primitive completes its smallest safe boundary, releases claims, reports Cancelled, and lets its plan handle the result.
+      references: [agent-autonomy, capability-arbitration]
+
+  - decision: data-first-content-pipeline
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Typed RON Content Pipeline
+      summary: RON assets define scenarios, maps, people, objects, items, recipes, plans, and conducts. Registered Rust primitives, predicates, scorers, and schemas supply typed implementation.
+      references: [content-registry, plan-library]
+
+  - decision: strict-content-validation-and-reload
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Transactional Content Validation and Reload
+      summary: Scenario load aggregates every validation error and fails if any remain. Hot reload retains the last valid content set until a replacement validates; active plans retain their compiled snapshots while newly selected plans use the replacement.
+      references: [content-registry, plan-library]
+
+  - decision: semantic-headless-tests
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Seeded Semantic Tests
+      summary: Primary tests are headless, seeded scenarios that assert named outcomes such as completing a recipe, reacting to contention, and releasing claims after cancellation.
+      references: [scenario-test-harness]
+
+  - decision: snapshots-and-event-ledger
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Versioned Snapshots and Event Ledger
+      summary: Saves consist of versioned world snapshots plus an append-only event ledger, with explicit schema migrations as formats change.
+      references: [simulation-persistence]
+
+  - decision: authoritative-client-projection
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Read-Only Client Projection
+      summary: The simulation is authoritative and emits read-only render snapshots after consumed ticks. The Bevy client mirrors those snapshots into presentation entities.
+      references: [village-simulation, village-client]
+
+  - decision: typed-player-commands
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Next-Tick Player Command Validation
+      summary: The client submits typed PlayerCommands to a simulation inbox. The next ingest phase validates each and publishes accepted or rejected results; accepted orders follow normal planning.
+      references: [player-command-boundary]
+
+  - decision: discrete-simulation-smooth-presentation
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Tile-Exact Simulation with Client Interpolation
+      summary: Simulation positions change tile-to-tile. The client interpolates only between render snapshots and never feeds interpolation back into simulation state.
+      references: [tile-navigation, pixel-art-presentation]
+
+  - decision: 32-pixel-art-contract
+    core:
+      status: accepted
+      confidence: confirmed
+      title: 32x32 Pixel-Art Contract
+      summary: Source tiles are 32x32. People use 32x48 or 32x64 frames as required, rendered with nearest-neighbour sampling, integer scaling, and pixel-snapped orthographic placement.
+      references: [pixel-art-presentation]
+
+  - decision: modular-shared-content-assets
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Shared Domain Content Assets
+      summary: A workspace-level assets/content tree holds domain files for scenario, map, people, objects, items, recipes, plans, and conducts. Scenarios assemble them by readable IDs.
+      references: [content-registry]
+
+  - decision: player-role-and-core-pressure
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Household Orders in an Autonomous Village
+      summary: The player manages only the newcomer household through queued, promoted, forced, and cancelled tasks. The core pressure balances bodily and domestic needs, personal priorities, and belonging in the village.
+      references: [agent-autonomy, player-command-boundary, setting-direction]
+
+  - decision: intention-plan-and-conduct-model
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Utility Intentions, Plan Libraries, and Conducts
+      summary: Intentions are continuously utility-scored with intention-owned hysteresis. Recursive HTN-like namespaced plans may call conduct methods; intrinsic, persistent, and contextual conduct layers select priority-ordered implementations, may delegate downward, and fail explicitly when absent.
+      references: [agent-autonomy, plan-library, conduct-resolution]
+
+  - decision: capabilities-and-group-coordination
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Concurrent Capabilities and Group Coordinators
+      summary: Atomic actions use individually arbitrated capabilities so compatible acts can overlap. Coordinating event entities distribute roles and constraints for group activity, but participants still execute ordinary atomic tasks and can defect.
+      references: [capability-arbitration, agent-autonomy]
+
+  - decision: relationship-memory-belief-model
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Directional Social History
+      summary: Events produce subjective perceptions, temporary moments, salience- and trait-decayed memories, directional multidimensional relationship-ledger entries, evidence-backed beliefs, and emergent labels. The player only sees household knowledge, observation, hearsay, or inference.
+      references: [social-consequences, world-events]
+
+  - decision: generic-village-initiatives
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Generic Branching Initiatives
+      summary: Persistent Initiative entities represent larger local situations with systemic predicates, branching state graphs, calendar pressures, stakeholder actions, and knowledge-aware public surfaces rather than bespoke scripted chains.
+      references: [initiative-system, social-consequences]
+
+  - decision: initial-needs-and-recipes
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Six Scalar Needs and Data-Defined Cooking
+      summary: Hunger, energy, toilet, hygiene, warmth, and comfort are bounded scalars with individual decay, recovery, and utility curves. Warmth uses per-room ambient state and personal exposure; shower and sink recover hygiene differently; furniture provides comfort. Recipes are first-class assets with ingredients, tools, ordered steps, outputs, and quality. The initial recipe set is tea, toast, and pasta with jarred tomato sauce and optional cheese.
+      references: [agent-autonomy, smart-objects, content-registry]

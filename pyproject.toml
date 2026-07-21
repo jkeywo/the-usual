@@ -1,0 +1,15 @@
+[project]
+name = "the-usual-tooling"
+version = "0.1.0"
+description = "Development tooling and PASM architecture model for The Usual."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pasm @ git+https://github.com/jkeywo/pasm@de8a7bfce3aefa799eea51f8e5a2708e996e8b6e",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["pytest>=8.0"]

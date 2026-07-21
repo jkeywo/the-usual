@@ -1,0 +1,32 @@
+entities:
+  - system: milestone-4-village-initiatives
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Milestone 4 — Village Initiatives
+      summary: Prove a generic, branching initiative model through the King's Head extended-hours application, rather than scripting one dispute chain.
+      references: [pub-hours-initiative, initiative-calendar-and-noticeboard, group-activity-coordinators]
+
+  - component: pub-hours-initiative
+    core:
+      status: proposed
+      confidence: confirmed
+      title: King's Head Hours Initiative
+      summary: The landlord's application for later Friday hours and occasional music begins in gathering support. Supporters, opponents, and undecided residents act for personal reasons; household stance is inferred from evidence, not a binary meter.
+      references: [initiative-system, social-consequences]
+
+  - component: initiative-calendar-and-noticeboard
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Calendar and Knowledge-Aware Noticeboard
+      summary: Calendar pressure creates public opportunities and deadlines. The noticeboard shows public or discovered entries, never omniscient private initiative state.
+      references: [initiative-system, knowledge-aware-presentation]
+
+  - component: group-activity-coordinators
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Group Activity Coordinators
+      summary: Coordinators distribute roles and constraints for events such as a surprise cake or cat rescue, while participating agents retain ordinary atomic tasks and can fail or defect.
+      references: [capability-arbitration, initiative-system]

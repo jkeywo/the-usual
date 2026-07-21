@@ -1,0 +1,165 @@
+entities:
+  - system: the-usual-runtime
+    core:
+      status: proposed
+      confidence: confirmed
+      title: The Usual Runtime
+      summary: Deterministic village-life simulation in which autonomous agents and player orders share one planning and execution path.
+      references: [village-simulation, village-client, cottage-arrival-scenario]
+
+  - component: village-simulation
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Headless Village Simulation
+      summary: Authoritative fixed-tick ECS world containing residents, places, needs, plans, objects, events, and persistence without presentation dependencies.
+      references: [tick-driver, world-events, agent-autonomy, simulation-persistence]
+    implementation:
+      status: declared
+      paths: [crates/village_sim/src]
+
+  - component: village-client
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Bevy Village Client
+      summary: Desktop Bevy presentation layer that mirrors read-only simulation snapshots and submits typed player commands.
+      references: [player-command-boundary, pixel-art-presentation]
+    implementation:
+      status: declared
+      paths: [crates/village_game/src]
+
+  - component: tick-driver
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Fixed Tick Driver
+      summary: Advances deterministic 250 ms simulation ticks through ingest, update, plan, allocation, action, and publication phases.
+      references: [world-events, agent-autonomy, capability-arbitration]
+
+  - component: world-events
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Immutable World Events
+      summary: Resolved actions publish immutable events at tick end; consumers ingest them only at the following tick.
+      references: [social-consequences, simulation-persistence]
+
+  - component: agent-autonomy
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Autonomous Intentions and Plans
+      summary: Agents utility-score intentions with intention-owned hysteresis and execute persistent HTN-like plan trees made from namespaced fragments and primitive task state machines.
+      references: [plan-library, conduct-resolution, player-command-boundary]
+
+  - component: plan-library
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Namespaced Plan Library
+      summary: Typed RON plan fragments invoke registered predicates, scorers, primitives, and semantic conduct methods.
+      references: [content-registry, conduct-resolution]
+
+  - component: conduct-resolution
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Conduct Stack
+      summary: Intrinsic, persistent, and contextual conducts answer semantic methods by priority, explicit delegation, or failure; intentions remain responsible for why an agent acts.
+      references: [agent-autonomy, plan-library]
+
+  - component: capability-arbitration
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Capability and Slot Arbitration
+      summary: Atomic actions claim locomotion, hands, voice, attention, posture, social presence, and object slots by priority, request age, then SimId, enabling compatible concurrency.
+      references: [smart-objects, tile-navigation]
+
+  - component: smart-objects
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Smart Objects and Physical Items
+      summary: Data-defined objects expose affordances, slots, and storage; containers hold item stacks while individually significant held or placed things become entities.
+      references: [content-registry, capability-arbitration]
+
+  - component: tile-navigation
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Layered Tile Navigation
+      summary: A* pathfinding over layered square tiles with one-person live occupancy by default and occupiable door and stair portals; no future movement reservation exists.
+      references: [capability-arbitration, cottage-arrival-scenario]
+
+  - component: social-consequences
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Subjective Social Consequences
+      summary: World events become personal perceptions, moments, memories, relationship-ledger entries, evidence-backed beliefs, and emergent social labels.
+      references: [world-events, initiative-system]
+
+  - component: initiative-system
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Village Initiatives
+      summary: Persistent, branching entities model longer-lived situations proposed and advanced by agents and institutions under calendar pressure.
+      references: [social-consequences, cottage-arrival-scenario]
+
+  - component: content-registry
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Validated Content Registry
+      summary: Shared workspace RON assets define scenarios, maps, people, objects, items, recipes, plans, and conducts; named Rust implementations provide typed behaviour.
+      references: [plan-library, smart-objects, cottage-arrival-scenario]
+
+  - component: player-command-boundary
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Player Command Boundary
+      summary: The client submits typed household commands to the simulation inbox; next-tick validation accepts or rejects them, and accepted orders use ordinary AI planning and execution.
+      references: [agent-autonomy, village-client]
+
+  - component: simulation-persistence
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Simulation Persistence
+      summary: Versioned world snapshots are paired with an append-only event ledger and explicit schema migrations.
+      references: [world-events, agent-autonomy]
+
+  - component: pixel-art-presentation
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Pixel-Art Presentation
+      summary: 32x32 source tiles, 32x48 or 32x64 people, nearest-neighbour integer scaling, pixel-snapped orthographic placement, and client-only movement interpolation.
+      references: [village-client, tile-navigation]
+
+  - component: cottage-arrival-scenario
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Cottage Arrival Scenario
+      summary: Two newcomers in a hand-authored two-storey cottage provide the first headless test fixture and later playable opening.
+      references: [tile-navigation, smart-objects, agent-autonomy]
+
+  - component: setting-direction
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Timeless British Village Setting
+      summary: A warm, observant community comedy set in an analogue late twentieth-century Britain where ordinary material pressures, local institutions, and dignity create consequenceful farce.
+
+  - component: scenario-test-harness
+    core:
+      status: proposed
+      confidence: confirmed
+      title: Seeded Semantic Scenario Tests
+      summary: Headless fixed-seed fixtures assert named semantic outcomes rather than brittle full event logs.
+      references: [village-simulation, cottage-arrival-scenario]

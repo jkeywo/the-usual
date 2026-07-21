@@ -1,0 +1,48 @@
+entities:
+  - system: setting-guide
+    core:
+      status: accepted
+      confidence: confirmed
+      title: The Usual Setting Guide
+      summary: A warm, observant, slightly heightened British community comedy about ordinary people whose private needs and public dignity get in one another's way.
+      references: [setting-direction, player-role-and-core-pressure]
+
+  - component: analogue-late-twentieth-century
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Analogue Long Late Twentieth Century
+      summary: The setting can resemble any point between the 1950s and 1990s without resolving to a precise year. Prefer landlines, notices, cash, buses, paper forms, local papers, and repairable domestic objects; avoid exact politicians, brands, songs, and internet culture.
+      references: [setting-direction]
+
+  - component: social-realist-farce
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Material Social Realism with Plausible Farce
+      summary: Work, money, repairs, weather, housing, institutions, and service pressures matter. Farce comes from pride, timing, incomplete knowledge, competing commitments, and attempts to save face, never arbitrary stupidity or cruelty.
+      references: [setting-direction, agent-autonomy, social-consequences]
+
+  - component: local-institutions-and-social-capital
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Institutions and Social Capital
+      summary: Pub, committee, shop, workplace, church hall, allotments, and family networks replace country-house hierarchy. Social capital is who will vouch, forgive, include, lend, or quietly obstruct.
+      references: [setting-direction, initiative-system]
+
+  - component: local-lore-as-sourced-belief
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Local Lore as Sourced Belief
+      summary: Customs, warnings, and disputed histories are practical, data-backed social claims with a source and circulation path. They can influence conversation or behaviour but are never confirmed supernatural truth.
+      references: [setting-direction, social-consequences]
+
+  - component: dignity-kindness-and-consequence
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Dignity, Kindness, and Consequence
+      summary: Small actions are visible, people are often indirect, and public embarrassment has a cost. Competence is social power, but kindness, apologies, lifts home, borrowed tools, and turning up when needed remain possible.
+      references: [setting-direction, social-consequences]
