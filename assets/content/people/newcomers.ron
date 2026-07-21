@@ -1,0 +1,12 @@
+(
+    people: [
+        (
+            id: "person.newcomer_a",
+            display_name: "Rowan Bell",
+        ),
+        (
+            id: "person.newcomer_b",
+            display_name: "Mara Bell",
+        ),
+    ],
+)

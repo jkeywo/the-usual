@@ -19,8 +19,8 @@ entities:
     core:
       status: proposed
       confidence: confirmed
-      title: Newcomer Household
-      summary: An established adult couple begins with mutual familiarity, affection, comfort, and trust but contrasting practical/private and sociable/curious priorities. Both remain autonomous.
+      title: Newcomer Pair
+      summary: Two named newcomers form the initial household fixture. Their contrasting traits and relationship state are introduced by later MVP slices; both will remain autonomous.
       references: [agent-autonomy, cottage-arrival-scenario]
 
   - component: cottage-needs-and-affordances
@@ -33,11 +33,14 @@ entities:
 
   - component: cottage-content-fixture
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Cottage Content Fixture
-      summary: Shared RON content defines the Cottage Arrival scenario, map, couple, initial items, object definitions, Human conduct, initial plans, and a fixed seed.
+      summary: Shared RON content currently defines the Cottage Arrival scenario, two named newcomers, and a fixed seed. The map, items, object definitions, conducts, and plans are introduced by later MVP slices.
       references: [content-registry, cottage-arrival-scenario]
+    implementation:
+      status: declared
+      paths: [assets/content/scenarios/cottage_arrival.ron, assets/content/people/newcomers.ron]
 
   - component: cottage-contention-test
     core:

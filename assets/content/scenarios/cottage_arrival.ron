@@ -1,0 +1,8 @@
+(
+    id: "scenario.cottage_arrival",
+    seed: 4243,
+    people: [
+        "person.newcomer_a",
+        "person.newcomer_b",
+    ],
+)
