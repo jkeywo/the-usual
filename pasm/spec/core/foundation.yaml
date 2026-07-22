@@ -167,7 +167,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Cottage Arrival Scenario
-      summary: Two newcomers in a hand-authored two-storey cottage now provide the first headless fixture: both can traverse the paired stairs, and the fixture supplies the initial data-defined toilet interaction. Its later playable opening remains post-MVP work.
+      summary: "Two newcomers in a hand-authored two-storey cottage now provide the first headless fixture: both can traverse the paired stairs, and the fixture supplies the initial data-defined toilet interaction. Its later playable opening remains post-MVP work."
       references: [tile-navigation, smart-objects, agent-autonomy]
 
   - component: setting-direction
