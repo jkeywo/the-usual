@@ -296,6 +296,7 @@ pub enum ContentError {
 #[derive(Component, Debug)]
 struct Resident {
     definition_id: DefinitionId,
+    display_name: String,
 }
 
 #[derive(Component, Debug)]
@@ -530,6 +531,24 @@ pub struct Simulation {
     event_ledger: Vec<WorldEvent>,
 }
 
+/// The small, immutable read model consumed by the Cottage client.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CottageSnapshot {
+    pub tick: u64,
+    pub floors: Vec<FloorDefinition>,
+    pub objects: Vec<SmartObjectDefinition>,
+    pub residents: Vec<ClientResidentSnapshot>,
+}
+
+/// A resident's presentation-safe state. ECS entity IDs remain private.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientResidentSnapshot {
+    pub id: SimId,
+    pub definition_id: DefinitionId,
+    pub display_name: String,
+    pub position: TilePosition,
+}
+
 impl Simulation {
     /// Creates a simulation from validated scenario content.
     pub fn from_content(content: ScenarioContent) -> Result<Self, ContentError> {
@@ -657,6 +676,7 @@ impl Simulation {
             .world
             .spawn(Resident {
                 definition_id: person.id.clone(),
+                display_name: person.display_name.clone(),
             })
             .insert(Position(position))
             .id();
@@ -711,6 +731,38 @@ impl Simulation {
                 .get::<Position>(*entity)
                 .map(|position| position.0)
         })
+    }
+
+    /// Projects only authored, presentation-safe Cottage data for a client.
+    #[must_use]
+    pub fn cottage_snapshot(&self) -> CottageSnapshot {
+        let residents = self
+            .residents
+            .iter()
+            .map(|(id, entity)| {
+                let resident = self
+                    .world
+                    .get::<Resident>(*entity)
+                    .expect("resident index always points into the ECS world");
+                let position = self
+                    .world
+                    .get::<Position>(*entity)
+                    .expect("resident always has a position")
+                    .0;
+                ClientResidentSnapshot {
+                    id: *id,
+                    definition_id: resident.definition_id.clone(),
+                    display_name: resident.display_name.clone(),
+                    position,
+                }
+            })
+            .collect();
+        CottageSnapshot {
+            tick: self.tick,
+            floors: self.map.floors.clone(),
+            objects: self.objects.values().cloned().collect(),
+            residents,
+        }
     }
 
     /// Starts a narrow navigation task. It plans immediately but claims no

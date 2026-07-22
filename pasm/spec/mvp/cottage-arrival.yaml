@@ -69,8 +69,11 @@ entities:
 
   - component: cottage-playable-client
     core:
-      status: proposed
+      status: implemented
       confidence: confirmed
       title: Cottage Playable Client
-      summary: After the headless checkpoint, placeholder pixel art adds orthographic pan and zoom, optional selected-agent follow, agent-first order targeting, and a compact current-intention and queue card.
+      summary: The first runnable Bevy tableau loads the fixed Cottage fixture through a read-only snapshot, draws its two floors, toilet, furniture, and distinct layered newcomer presentations from curated 32px assets. Input, camera controls, task UI, and audio follow in subsequent playable-client slices.
       references: [village-client, player-command-boundary, pixel-art-presentation]
+    implementation:
+      status: declared
+      paths: [crates/village_game/src/main.rs, crates/village_sim/src/lib.rs, assets/client]

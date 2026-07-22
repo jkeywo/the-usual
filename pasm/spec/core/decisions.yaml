@@ -160,6 +160,14 @@ entities:
       summary: Source tiles are 32x32. People use 32x48 or 32x64 frames as required, rendered with nearest-neighbour sampling, integer scaling, and pixel-snapped orthographic placement.
       references: [pixel-art-presentation]
 
+  - decision: cottage-client-asset-provenance
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Curated Cottage Client Assets
+      summary: The playable Cottage client uses a documented, curated subset of the supplied 32px character, interior, furniture, and house assets. Clothing presentation is a separate client-only atlas layer whose derived runtime texture performs HSV hue rotation while preserving alpha and value; it never alters authoritative state.
+      references: [village-client, pixel-art-presentation]
+
   - decision: modular-shared-content-assets
     core:
       status: accepted
