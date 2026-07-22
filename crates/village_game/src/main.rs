@@ -3,7 +3,9 @@
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use village_sim::{CottageSnapshot, ScenarioContent, Simulation};
+use village_sim::{
+    ClientIntention, ClientPlayerTaskState, CottageSnapshot, ScenarioContent, SimId, Simulation,
+};
 
 const TILE_PIXELS: f32 = 32.0;
 const CHARACTER_COLUMNS: u32 = 8;
@@ -16,6 +18,20 @@ struct SimulationDriver {
     current: CottageSnapshot,
     tick_timer: Timer,
 }
+
+/// Selection is presentation-only. The simulation remains unaware of it.
+#[derive(Default, Resource)]
+struct SelectedResident(Option<SimId>);
+
+#[derive(Component)]
+struct ResidentSelector(SimId);
+
+#[derive(Component)]
+struct StatusCardText;
+
+/// A client-only ground highlight for the currently inspected newcomer.
+#[derive(Component)]
+struct SelectedResidentMarker;
 
 #[derive(Clone, Copy, Component)]
 struct ResidentVisual {
@@ -46,6 +62,10 @@ fn main() {
                 advance_simulation,
                 interpolate_residents,
                 animate_walking,
+                select_resident_from_sprite,
+                select_resident_from_card,
+                update_selected_resident_marker,
+                update_status_card,
             ),
         )
         .run();
@@ -70,7 +90,17 @@ fn setup_cottage(
             TimerMode::Repeating,
         ),
     });
+    commands.insert_resource(SelectedResident::default());
     commands.spawn(Camera2d);
+    commands.spawn((
+        Sprite::from_color(
+            Color::srgba(0.95, 0.8, 0.2, 0.45),
+            Vec2::splat(TILE_PIXELS + 4.0),
+        ),
+        Transform::from_xyz(0.0, 0.0, 3.0),
+        Visibility::Hidden,
+        SelectedResidentMarker,
+    ));
     let house = asset_server.load("client/tiles/house_tiles.png");
     let house_layout = layouts.add(TextureAtlasLayout::from_grid(
         UVec2::splat(32),
@@ -159,7 +189,7 @@ fn setup_cottage(
         None,
         None,
     ));
-    for object in snapshot.objects {
+    for object in &snapshot.objects {
         let position = tile_to_world(object.position.x, object.position.y);
         commands.spawn((
             Sprite::from_atlas_image(
@@ -170,9 +200,183 @@ fn setup_cottage(
                 },
             ),
             Transform::from_xyz(position.x, position.y, 2.0),
-            Name::new(object.id.0),
+            Name::new(object.id.0.clone()),
         ));
     }
+
+    spawn_status_card(&mut commands, &asset_server, &snapshot);
+}
+
+fn spawn_status_card(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    snapshot: &CottageSnapshot,
+) {
+    let font = asset_server.load("client/ui/kenney_future_narrow.ttf");
+    let button = asset_server.load("client/ui/button.png");
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(16.0),
+                bottom: Val::Px(16.0),
+                width: Val::Px(300.0),
+                padding: UiRect::all(Val::Px(14.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(8.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.06, 0.09, 0.16)),
+            BorderColor::all(Color::srgb(0.38, 0.63, 0.86)),
+        ))
+        .with_children(|card| {
+            card.spawn((
+                Text::new("Select a newcomer to inspect them."),
+                TextFont {
+                    font: font.clone(),
+                    font_size: 22.0,
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+                StatusCardText,
+            ));
+            for resident in &snapshot.residents {
+                card.spawn((
+                    Button,
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(38.0),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    ImageNode::new(button.clone()),
+                    ResidentSelector(resident.id),
+                ))
+                .with_child((
+                    Text::new(resident.display_name.clone()),
+                    TextFont {
+                        font: font.clone(),
+                        font_size: 18.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.04, 0.08, 0.12)),
+                ));
+            }
+        });
+}
+
+fn select_resident_from_card(
+    mut selected: ResMut<SelectedResident>,
+    selectors: Query<(&Interaction, &ResidentSelector), Changed<Interaction>>,
+) {
+    for (interaction, selector) in &selectors {
+        if *interaction == Interaction::Pressed {
+            selected.0 = Some(selector.0);
+        }
+    }
+}
+
+fn select_resident_from_sprite(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    residents: Query<(&ResidentVisual, &GlobalTransform)>,
+    mut selected: ResMut<SelectedResident>,
+) {
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
+    let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
+        return;
+    };
+    let selected_id = residents
+        .iter()
+        .filter_map(|(resident, transform)| {
+            let distance = transform.translation().truncate().distance(world);
+            (distance <= TILE_PIXELS * 0.65).then_some((resident.id, distance))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(id, _)| id);
+    if selected_id.is_some() {
+        selected.0 = selected_id;
+    }
+}
+
+fn update_selected_resident_marker(
+    selected: Res<SelectedResident>,
+    residents: Query<(&ResidentVisual, &GlobalTransform)>,
+    mut marker: Query<(&mut Transform, &mut Visibility), With<SelectedResidentMarker>>,
+) {
+    let Ok((mut transform, mut visibility)) = marker.single_mut() else {
+        return;
+    };
+    let Some(id) = selected.0 else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    let Some((_, resident_transform)) = residents.iter().find(|(resident, _)| resident.id == id)
+    else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    transform.translation = resident_transform.translation();
+    transform.translation.z = 3.0;
+    *visibility = Visibility::Visible;
+}
+
+fn update_status_card(
+    selected: Res<SelectedResident>,
+    driver: Res<SimulationDriver>,
+    mut text: Query<&mut Text, With<StatusCardText>>,
+) {
+    if !selected.is_changed() && !driver.is_changed() {
+        return;
+    }
+    let Ok(mut text) = text.single_mut() else {
+        return;
+    };
+    let value = selected_status_text(selected.0, &driver.current);
+    text.0 = value;
+}
+
+fn selected_status_text(selected: Option<SimId>, snapshot: &CottageSnapshot) -> String {
+    selected
+        .and_then(|id| snapshot.residents.iter().find(|resident| resident.id == id))
+        .map_or_else(
+            || "Select a newcomer to inspect them.".to_owned(),
+            resident_status_text,
+        )
+}
+
+fn resident_status_text(resident: &village_sim::ClientResidentSnapshot) -> String {
+    let need = resident
+        .toilet_need
+        .map_or_else(|| "not applicable".to_owned(), |value| value.to_string());
+    let intention = match resident.autonomous_intention {
+        Some(ClientIntention::Toilet) => "Use toilet",
+        None => "None",
+    };
+    let task = resident.player_task.map_or_else(
+        || "None".to_owned(),
+        |task| match task.state {
+            ClientPlayerTaskState::Queued => format!("#{} queued", task.id.0),
+            ClientPlayerTaskState::Active => format!("#{} active", task.id.0),
+        },
+    );
+    format!(
+        "{}\nToilet need: {need}\nIntention: {intention}\nPlayer task: {task}",
+        resident.display_name
+    )
 }
 
 /// Makes a per-resident clothing texture once the source atlas has loaded.
@@ -384,7 +588,12 @@ fn content_root() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{rotate_hue, tile_to_world};
+    use village_sim::{
+        ClientIntention, ClientPlayerTaskSnapshot, ClientPlayerTaskState, ClientResidentSnapshot,
+        DefinitionId, PlayerTaskId, SimId, TilePosition,
+    };
+
+    use super::{resident_status_text, rotate_hue, selected_status_text, tile_to_world};
 
     #[test]
     fn tiles_project_to_their_pixel_centres() {
@@ -400,5 +609,45 @@ mod tests {
     #[test]
     fn hue_rotation_changes_chromatic_clothing_pixels() {
         assert_eq!(rotate_hue([255, 0, 0], 120.0), [0, 255, 0]);
+    }
+
+    #[test]
+    fn resident_card_uses_only_projected_authoritative_status() {
+        let resident = ClientResidentSnapshot {
+            id: SimId(1),
+            definition_id: DefinitionId::new("person.newcomer_a"),
+            display_name: "Rowan Bell".to_owned(),
+            position: TilePosition {
+                floor: 0,
+                x: 2,
+                y: 3,
+            },
+            toilet_need: Some(50),
+            autonomous_intention: Some(ClientIntention::Toilet),
+            player_task: Some(ClientPlayerTaskSnapshot {
+                id: PlayerTaskId(7),
+                state: ClientPlayerTaskState::Queued,
+            }),
+        };
+
+        assert_eq!(
+            resident_status_text(&resident),
+            "Rowan Bell\nToilet need: 50\nIntention: Use toilet\nPlayer task: #7 queued"
+        );
+    }
+
+    #[test]
+    fn resident_card_has_a_clear_no_selection_state() {
+        let snapshot = village_sim::CottageSnapshot {
+            tick: 0,
+            floors: Vec::new(),
+            objects: Vec::new(),
+            residents: Vec::new(),
+        };
+
+        assert_eq!(
+            selected_status_text(None, &snapshot),
+            "Select a newcomer to inspect them."
+        );
     }
 }

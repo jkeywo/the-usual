@@ -547,6 +547,31 @@ pub struct ClientResidentSnapshot {
     pub definition_id: DefinitionId,
     pub display_name: String,
     pub position: TilePosition,
+    /// The current authoritative scalar need, when the resident owns one.
+    pub toilet_need: Option<u8>,
+    /// The autonomous intention currently selected by the simulation.
+    pub autonomous_intention: Option<ClientIntention>,
+    /// A currently queued or executing player task for this resident.
+    pub player_task: Option<ClientPlayerTaskSnapshot>,
+}
+
+/// Presentation-safe names for the narrow set of autonomous intentions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientIntention {
+    Toilet,
+}
+
+/// Presentation-safe state of player work that is still in progress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientPlayerTaskSnapshot {
+    pub id: PlayerTaskId,
+    pub state: ClientPlayerTaskState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientPlayerTaskState {
+    Queued,
+    Active,
 }
 
 impl Simulation {
@@ -749,11 +774,17 @@ impl Simulation {
                     .get::<Position>(*entity)
                     .expect("resident always has a position")
                     .0;
+                let player_task = self.client_player_task(*id);
                 ClientResidentSnapshot {
                     id: *id,
                     definition_id: resident.definition_id.clone(),
                     display_name: resident.display_name.clone(),
                     position,
+                    toilet_need: self.toilet_need(*id),
+                    autonomous_intention: self
+                        .has_autonomous_toilet_intention(*id)
+                        .then_some(ClientIntention::Toilet),
+                    player_task,
                 }
             })
             .collect();
@@ -763,6 +794,38 @@ impl Simulation {
             objects: self.objects.values().cloned().collect(),
             residents,
         }
+    }
+
+    fn client_player_task(&self, resident: SimId) -> Option<ClientPlayerTaskSnapshot> {
+        self.use_requests
+            .iter()
+            .find_map(|request| {
+                (request.resident == resident)
+                    .then_some(request.player_task)
+                    .flatten()
+            })
+            .and_then(|id| {
+                self.player_tasks.get(&id).and_then(|state| {
+                    matches!(state, PlayerTaskState::Queued).then_some(ClientPlayerTaskSnapshot {
+                        id,
+                        state: ClientPlayerTaskState::Queued,
+                    })
+                })
+            })
+            .or_else(|| {
+                self.active_object_uses.get(&resident).and_then(|active| {
+                    active.player_task.and_then(|id| {
+                        self.player_tasks.get(&id).and_then(|state| {
+                            matches!(state, PlayerTaskState::Active).then_some(
+                                ClientPlayerTaskSnapshot {
+                                    id,
+                                    state: ClientPlayerTaskState::Active,
+                                },
+                            )
+                        })
+                    })
+                })
+            })
     }
 
     /// Starts a narrow navigation task. It plans immediately but claims no
@@ -2206,6 +2269,38 @@ mod tests {
                     value: 0,
                 }
         }));
+    }
+
+    #[test]
+    fn cottage_snapshot_exposes_authoritative_status_for_a_resident_card() {
+        let mut simulation = load_simulation();
+        assert!(simulation.set_toilet_need(SimId(1), 50));
+        simulation.advance_tick();
+
+        let resident = &simulation.cottage_snapshot().residents[0];
+        assert_eq!(resident.toilet_need, Some(50));
+        assert_eq!(resident.autonomous_intention, Some(ClientIntention::Toilet));
+        assert_eq!(resident.player_task, None);
+
+        let mut simulation = load_simulation();
+        let task = PlayerTaskId(47);
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task,
+            resident: SimId(1),
+            object: DefinitionId::new("object.cottage_toilet"),
+            affordance: DefinitionId::new("affordance.use_toilet"),
+            priority: 100,
+        });
+        simulation.advance_tick();
+
+        let resident = &simulation.cottage_snapshot().residents[0];
+        assert_eq!(
+            resident.player_task,
+            Some(ClientPlayerTaskSnapshot {
+                id: task,
+                state: ClientPlayerTaskState::Active,
+            })
+        );
     }
 
     #[test]

@@ -77,3 +77,14 @@ entities:
     implementation:
       status: declared
       paths: [crates/village_game/src/main.rs, crates/village_sim/src/lib.rs, assets/client]
+
+  - component: cottage-resident-inspection
+    core:
+      status: implemented
+      confidence: confirmed
+      title: Selected Newcomer Status Card
+      summary: The Cottage client keeps presentation-only resident selection. Clicking a newcomer or their curated UI selector shows their authoritative display name, Toilet need, autonomous Toilet intention, and live queued or active player task state from the immutable Cottage snapshot. No selection state or UI interaction mutates simulation state.
+      references: [village-client, agent-autonomy, player-command-boundary]
+    implementation:
+      status: declared
+      paths: [crates/village_game/src/main.rs, crates/village_sim/src/lib.rs, assets/client/ui]
