@@ -1449,6 +1449,17 @@ impl Simulation {
             return;
         };
         if let Some(blocked_by) = self.occupancy.get(&next).copied() {
+            if let Some(path) =
+                self.find_path_avoiding_occupied_tiles(resident, origin, state.destination)
+            {
+                // The route was made against static map geometry. A resident
+                // can subsequently occupy its next step, so replace it with
+                // a deterministic live route instead of needlessly waiting.
+                state.path = path;
+                state.next_step = 1;
+                self.go_to.insert(resident, state);
+                return;
+            }
             self.emit(WorldEventKind::GoToWaited {
                 resident,
                 blocked_by,
@@ -1615,6 +1626,81 @@ impl Simulation {
             }
         }
         None
+    }
+
+    /// Replans around tiles occupied by other residents. Initial routes stay
+    /// occupancy-agnostic so simultaneous movement claims remain fair.
+    fn find_path_avoiding_occupied_tiles(
+        &self,
+        resident: SimId,
+        origin: TilePosition,
+        destination: TilePosition,
+    ) -> Option<Vec<TilePosition>> {
+        if !self.is_walkable(origin)
+            || !self.is_walkable(destination)
+            || self
+                .occupancy
+                .get(&destination)
+                .is_some_and(|occupant| *occupant != resident)
+        {
+            return None;
+        }
+        let mut open = BinaryHeap::new();
+        let mut costs = BTreeMap::from([(origin, 0_u32)]);
+        let mut came_from = BTreeMap::new();
+        open.push(Reverse((
+            self.heuristic(origin, destination),
+            0_u32,
+            origin,
+        )));
+        while let Some(Reverse((_estimated, cost, current))) = open.pop() {
+            if current == destination {
+                let mut path = vec![current];
+                let mut cursor = current;
+                while let Some(previous) = came_from.get(&cursor).copied() {
+                    path.push(previous);
+                    cursor = previous;
+                }
+                path.reverse();
+                return Some(path);
+            }
+            if costs.get(&current).copied() != Some(cost) {
+                continue;
+            }
+            for neighbour in self.neighbours(current).into_iter().filter(|candidate| {
+                self.occupancy
+                    .get(candidate)
+                    .is_none_or(|occupant| *occupant == resident)
+                    && !self.tile_is_next_movement_target(*candidate, resident)
+            }) {
+                let next_cost = cost + 1;
+                if costs.get(&neighbour).is_none_or(|known| next_cost < *known) {
+                    costs.insert(neighbour, next_cost);
+                    came_from.insert(neighbour, current);
+                    open.push(Reverse((
+                        next_cost + self.heuristic(neighbour, destination),
+                        next_cost,
+                        neighbour,
+                    )));
+                }
+            }
+        }
+        None
+    }
+
+    /// A rerouting resident must also avoid the next tile another resident
+    /// has already committed to approaching. This is a soft, one-step
+    /// reservation used only for replanning; normal movement claims still
+    /// decide simultaneous approaches by priority.
+    fn tile_is_next_movement_target(&self, tile: TilePosition, resident: SimId) -> bool {
+        self.go_to.iter().any(|(other, state)| {
+            *other != resident
+                && state
+                    .traversal
+                    .as_ref()
+                    .map(|traversal| traversal.destination == tile)
+                    .unwrap_or_else(|| state.path.get(state.next_step) == Some(&tile))
+        })
     }
 
     fn heuristic(&self, from: TilePosition, to: TilePosition) -> u32 {
@@ -1873,6 +1959,74 @@ mod tests {
                         y: 1,
                     },
                 }
+        }));
+    }
+
+    #[test]
+    fn go_to_replans_when_another_resident_blocks_its_next_step() {
+        let mut simulation = load_simulation();
+        let resident = SimId(1);
+        let blocker = SimId(2);
+
+        assert!(simulation.begin_go_to(
+            resident,
+            TilePosition {
+                floor: 0,
+                x: 4,
+                y: 1,
+            },
+        ));
+        assert!(simulation.begin_go_to_with_priority(
+            blocker,
+            TilePosition {
+                floor: 0,
+                x: 3,
+                y: 1,
+            },
+            1,
+        ));
+        simulation.advance_tick();
+        assert_eq!(
+            simulation.resident_position(blocker),
+            Some(TilePosition {
+                floor: 0,
+                x: 2,
+                y: 1,
+            })
+        );
+
+        let route = simulation
+            .find_path_avoiding_occupied_tiles(
+                resident,
+                TilePosition {
+                    floor: 0,
+                    x: 1,
+                    y: 1,
+                },
+                TilePosition {
+                    floor: 0,
+                    x: 4,
+                    y: 1,
+                },
+            )
+            .expect("a route around the blocker and its immediate target");
+        assert_eq!(
+            route.first(),
+            Some(&TilePosition {
+                floor: 0,
+                x: 1,
+                y: 1,
+            })
+        );
+        assert!(!route.contains(&TilePosition {
+            floor: 0,
+            x: 2,
+            y: 1,
+        }));
+        assert!(!route.contains(&TilePosition {
+            floor: 0,
+            x: 3,
+            y: 1,
         }));
     }
 

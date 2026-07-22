@@ -10,7 +10,10 @@ use village_sim::{
     WorldEvent, WorldEventKind,
 };
 
+/// The authored cottage remains a 32px grid. Residents and furniture use a
+/// deliberately larger presentation scale so they read clearly within it.
 const TILE_PIXELS: f32 = 32.0;
+const ACTOR_AND_FURNITURE_SCALE: f32 = 2.0;
 const CHARACTER_COLUMNS: u32 = 8;
 const CLOTHING_FIRST_INDEX: usize = 32;
 
@@ -72,6 +75,9 @@ struct UseToiletButton;
 
 #[derive(Component)]
 struct CancelPlayerTaskButton;
+
+#[derive(Component)]
+struct CancelPlayerTaskText;
 
 #[derive(Component)]
 struct SemanticEventFeedText;
@@ -321,7 +327,8 @@ fn setup_cottage(
                     index: 0,
                 },
             ),
-            Transform::from_xyz(position.x, position.y, 4.0),
+            Transform::from_xyz(position.x, position.y, 4.0)
+                .with_scale(Vec3::splat(ACTOR_AND_FURNITURE_SCALE)),
             Name::new(resident.display_name.clone()),
             ResidentVisual { id: resident.id },
             WalkFrames { first_index: 0 },
@@ -338,7 +345,8 @@ fn setup_cottage(
                     index: CLOTHING_FIRST_INDEX,
                 },
             ),
-            Transform::from_xyz(position.x, position.y, 5.0),
+            Transform::from_xyz(position.x, position.y, 5.0)
+                .with_scale(Vec3::splat(ACTOR_AND_FURNITURE_SCALE)),
             ResidentVisual { id: resident.id },
             WalkFrames {
                 first_index: CLOTHING_FIRST_INDEX,
@@ -371,7 +379,8 @@ fn setup_cottage(
                     index: 144,
                 },
             ),
-            Transform::from_xyz(position.x, position.y, 2.0),
+            Transform::from_xyz(position.x, position.y, 2.0)
+                .with_scale(Vec3::splat(ACTOR_AND_FURNITURE_SCALE)),
             Name::new(object.id.0.clone()),
             FloorVisual(object.position.floor),
         ));
@@ -490,6 +499,7 @@ fn spawn_status_card(
                     ..default()
                 },
                 TextColor(Color::srgb(0.04, 0.08, 0.12)),
+                CancelPlayerTaskText,
             ));
             card.spawn((
                 Text::new(""),
@@ -756,6 +766,7 @@ fn update_cancel_button(
     driver: Res<SimulationDriver>,
     order: Res<OrderState>,
     mut buttons: Query<&mut Visibility, With<CancelPlayerTaskButton>>,
+    mut labels: Query<&mut Text, With<CancelPlayerTaskText>>,
 ) {
     if !selected.is_changed() && !driver.is_changed() && !order.is_changed() {
         return;
@@ -768,6 +779,13 @@ fn update_cancel_button(
         } else {
             Visibility::Hidden
         };
+    }
+    let label = selected_task_to_cancel(selected.0, &driver.current).map_or_else(
+        || "Cancel task".to_owned(),
+        |task| format!("Cancel task #{}", task.0),
+    );
+    for mut text in &mut labels {
+        text.0 = label.clone();
     }
 }
 
@@ -1267,15 +1285,15 @@ fn resident_status_text(resident: &village_sim::ClientResidentSnapshot) -> Strin
         Some(ClientIntention::Toilet) => "Use toilet",
         None => "None",
     };
-    let task = resident.player_task.map_or_else(
-        || "None".to_owned(),
+    let tasks = resident.player_task.map_or_else(
+        || "Current tasks:\n- None".to_owned(),
         |task| match task.state {
-            ClientPlayerTaskState::Queued => format!("#{} queued", task.id.0),
-            ClientPlayerTaskState::Active => format!("#{} active", task.id.0),
+            ClientPlayerTaskState::Queued => format!("Current tasks:\n- #{} queued", task.id.0),
+            ClientPlayerTaskState::Active => format!("Current tasks:\n- #{} active", task.id.0),
         },
     );
     format!(
-        "{}\nToilet need: {need}\nIntention: {intention}\nPlayer task: {task}",
+        "{}\nToilet need: {need}\nIntention: {intention}\n{tasks}",
         resident.display_name
     )
 }
@@ -1559,7 +1577,7 @@ mod tests {
 
         assert_eq!(
             resident_status_text(&resident),
-            "Rowan Bell\nToilet need: 50\nIntention: Use toilet\nPlayer task: #7 queued"
+            "Rowan Bell\nToilet need: 50\nIntention: Use toilet\nCurrent tasks:\n- #7 queued"
         );
     }
 

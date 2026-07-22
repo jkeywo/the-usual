@@ -72,7 +72,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Cottage Playable Client
-      summary: The first runnable Bevy tableau centres its initial wide ground-floor view on the newcomer pair and draws an opaque base layer beneath its two floors, an authored toilet atlas cell, furniture, and distinct layered newcomer presentations from curated 32px assets. Selection and camera controls are implemented in later playable-client components.
+      summary: The first runnable Bevy tableau centres its initial wide ground-floor view on the newcomer pair and draws an opaque base layer beneath its two floors, an authored toilet atlas cell, furniture, and distinct layered newcomer presentations from curated 32px source assets. The grid and house tiles remain 32px; furniture and residents render at a deliberate 2x presentation scale. Selection and camera controls are implemented in later playable-client components.
       references: [village-client, player-command-boundary, pixel-art-presentation]
     implementation:
       status: declared
@@ -83,7 +83,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Selected Newcomer Status Card
-      summary: The Cottage client keeps presentation-only resident selection. Clicking a newcomer or their curated UI selector shows their authoritative display name, Toilet need, autonomous Toilet intention, and live queued or active player task state from the immutable Cottage snapshot. No selection state or UI interaction mutates simulation state.
+      summary: The Cottage client keeps presentation-only resident selection. Clicking a newcomer or their curated UI selector shows their authoritative display name, Toilet need, autonomous Toilet intention, and current queued or active player tasks as a readable list from the immutable Cottage snapshot. Each cancellable listed task is exposed by its stable-ID cancel control. No selection state or UI interaction mutates simulation state.
       references: [village-client, agent-autonomy, player-command-boundary]
     implementation:
       status: declared
@@ -127,7 +127,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Physical Toilet Need and Right-Click Move
-      summary: Rowan begins with an authored decaying Toilet need. On activation, the autonomous Human plan navigates to the authored toilet tile before entering normal contention and use; recovery still follows ObjectUseCompleted only. Selecting a newcomer and short right-clicking visible ground submits a deferred typed QueueGoTo task for that tile, while right-drag remains camera pan.
+      summary: Rowan begins with an authored decaying Toilet need. On activation, the autonomous Human plan navigates to the authored toilet tile before entering normal contention and use; recovery still follows ObjectUseCompleted only. Navigation replans deterministically around live resident tile occupancy and other residents' immediate movement destinations when its next route step becomes blocked. Selecting a newcomer and short right-clicking visible ground submits a deferred typed QueueGoTo task for that tile, while right-drag remains camera pan.
       references: [agent-autonomy, tile-navigation, player-command-boundary, cottage-needs-and-affordances]
     implementation:
       status: declared

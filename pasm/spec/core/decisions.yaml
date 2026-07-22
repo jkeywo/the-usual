@@ -173,8 +173,16 @@ entities:
       status: accepted
       confidence: confirmed
       title: Deferred Ground Move Command
-      summary: A selected household resident receives a typed QueueGoTo command from a short right-click on the focused floor. The simulation validates the destination and uses ordinary live-occupancy navigation; right-drag remains a client-only camera gesture.
+      summary: A selected household resident receives a typed QueueGoTo command from a short right-click on the focused floor. The simulation validates the destination, initially arbitrates ordinary live occupancy, and deterministically replans around occupied tiles and other residents' immediate movement targets if a later next step is blocked; right-drag remains a client-only camera gesture.
       references: [player-command-boundary, tile-navigation, village-client]
+
+  - decision: oversized-cottage-actors-and-furniture
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Oversized Cottage Actors and Furniture
+      summary: The Cottage client keeps its authored 32px world grid and house tiles at source size, then displays curated furniture and character frames at a nearest-neighbour 2x presentation scale. This changes presentation scale only; authoritative TilePosition coordinates and simulation navigation remain unchanged.
+      references: [village-client, pixel-art-presentation, tile-navigation]
 
   - decision: cottage-client-selection-is-presentation-only
     core:
