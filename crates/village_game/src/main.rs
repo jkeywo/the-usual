@@ -1304,7 +1304,10 @@ fn rotate_hue([red, green, blue]: [u8; 3], degrees: f32) -> [u8; 3] {
 
 fn advance_simulation(time: Res<Time>, mut driver: ResMut<SimulationDriver>) {
     driver.tick_timer.tick(time.delta());
-    while driver.tick_timer.just_finished() {
+    // `just_finished()` remains true until the next `tick` call. A `while`
+    // around it therefore never exits on the first 250 ms simulation tick.
+    // Bevy records exactly how many intervals elapsed in this frame instead.
+    for _ in 0..driver.tick_timer.times_finished_this_tick() {
         driver.previous = driver.current.clone();
         driver.simulation.advance_tick();
         driver.current = driver.simulation.cottage_snapshot();
