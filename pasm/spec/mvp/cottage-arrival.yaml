@@ -99,3 +99,14 @@ entities:
     implementation:
       status: declared
       paths: [crates/village_game/src/main.rs]
+
+  - component: cottage-toilet-order-feedback
+    core:
+      status: implemented
+      confidence: confirmed
+      title: Selected Newcomer Toilet Order
+      summary: The selected newcomer can receive an agent-first Use toilet order for the fixed Cottage fixture. The client allocates a stable task ID, immediately presents it as pending, then consumes one accepted or rejected immutable receipt from the normal deferred event path and projects the resulting queued or active task state. The fixture toilet remains explicit but is not client-targetable.
+      references: [village-client, player-command-boundary, cottage-player-order-cancellation]
+    implementation:
+      status: declared
+      paths: [crates/village_game/src/main.rs, crates/village_sim/src/lib.rs, assets/client/audio]

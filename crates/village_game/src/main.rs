@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use bevy::{asset::AssetPlugin, input::mouse::MouseWheel};
 use village_sim::{
-    ClientIntention, ClientPlayerTaskState, CottageSnapshot, ScenarioContent, SimId, Simulation,
+    ClientIntention, ClientPlayerTaskState, CottageSnapshot, DefinitionId, PlayerCommand,
+    PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId, Simulation, WorldEvent,
+    WorldEventKind,
 };
 
 const TILE_PIXELS: f32 = 32.0;
@@ -61,6 +63,31 @@ struct ResidentSelector(SimId);
 struct StatusCardText;
 
 #[derive(Component)]
+struct OrderFeedbackText;
+
+#[derive(Component)]
+struct UseToiletButton;
+
+/// Allocates task IDs in the client only. An allocated ID is retained by the
+/// pending order until the simulation publishes its immutable receipt.
+#[derive(Default, Resource)]
+struct OrderState {
+    next_task_id: u64,
+    pending: Option<PendingOrder>,
+    receipt: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingOrder {
+    task: PlayerTaskId,
+}
+
+/// This state deliberately does not share the simulation seed. UI pitch is
+/// presentation-only variation, never an input to the deterministic world.
+#[derive(Resource)]
+struct UiAudioVariation(u64);
+
+#[derive(Component)]
 enum CameraControlButton {
     Follow,
     Floor(u8),
@@ -114,6 +141,7 @@ fn main() {
                 animate_walking,
                 select_resident_from_sprite,
                 select_resident_from_card,
+                submit_selected_toilet_order,
                 update_camera_controls,
                 update_camera_control_labels,
                 pan_and_zoom_camera,
@@ -122,6 +150,8 @@ fn main() {
                 update_selected_resident_marker,
                 apply_floor_focus,
                 update_status_card,
+                update_order_feedback,
+                update_order_feedback_text,
             )
                 .chain(),
         )
@@ -150,6 +180,11 @@ fn setup_cottage(
     commands.insert_resource(SelectedResident::default());
     commands.insert_resource(CottageCamera::default());
     commands.insert_resource(PanDrag::default());
+    commands.insert_resource(OrderState {
+        next_task_id: 1,
+        ..default()
+    });
+    commands.insert_resource(UiAudioVariation(client_audio_seed()));
     commands.spawn((Camera2d, CottageCameraEntity));
     commands.spawn((
         Sprite::from_color(
@@ -331,6 +366,37 @@ fn spawn_status_card(
                 Button,
                 Node {
                     width: Val::Percent(100.0),
+                    height: Val::Px(38.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                ImageNode::new(button.clone()),
+                UseToiletButton,
+            ))
+            .with_child((
+                Text::new("Use toilet"),
+                TextFont {
+                    font: font.clone(),
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.04, 0.08, 0.12)),
+            ));
+            card.spawn((
+                Text::new(""),
+                TextFont {
+                    font: font.clone(),
+                    font_size: 16.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.78, 0.9, 1.0)),
+                OrderFeedbackText,
+            ));
+            card.spawn((
+                Button,
+                Node {
+                    width: Val::Percent(100.0),
                     height: Val::Px(32.0),
                     justify_content: JustifyContent::Center,
                     align_items: AlignItems::Center,
@@ -373,6 +439,150 @@ fn spawn_status_card(
                 ));
             }
         });
+}
+
+/// The Cottage fixture contains one authored toilet. This control is
+/// agent-first: it never turns the object into a client-side click target.
+fn submit_selected_toilet_order(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut buttons: Query<&Interaction, (With<UseToiletButton>, Changed<Interaction>)>,
+    selected: Res<SelectedResident>,
+    mut driver: ResMut<SimulationDriver>,
+    mut order: ResMut<OrderState>,
+    mut audio_variation: ResMut<UiAudioVariation>,
+) {
+    if !buttons
+        .iter_mut()
+        .any(|interaction| *interaction == Interaction::Pressed)
+    {
+        return;
+    }
+    let Some(resident) = selected.0 else {
+        order.receipt = Some("Select a newcomer before ordering.".to_owned());
+        return;
+    };
+    if order.pending.is_some() || selected_resident_has_player_task(resident, &driver.current) {
+        order.receipt = Some("That newcomer already has a player task.".to_owned());
+        return;
+    }
+
+    let task = PlayerTaskId(order.next_task_id);
+    order.next_task_id += 1;
+    driver
+        .simulation
+        .submit_player_command(PlayerCommand::QueueUseToilet {
+            task,
+            resident,
+            object: DefinitionId::new("object.cottage_toilet"),
+            affordance: DefinitionId::new("affordance.use_toilet"),
+            priority: 100,
+        });
+    order.pending = Some(PendingOrder { task });
+    order.receipt = None;
+    play_ui_click(&mut commands, &asset_server, &mut audio_variation);
+}
+
+fn selected_resident_has_player_task(resident: SimId, snapshot: &CottageSnapshot) -> bool {
+    snapshot
+        .residents
+        .iter()
+        .find(|candidate| candidate.id == resident)
+        .is_some_and(|candidate| candidate.player_task.is_some())
+}
+
+/// Consumes an immutable receipt exactly once from the simulation's published
+/// ledger. The ledger records the receipt in the same advance that validates
+/// the command, while simulation systems still observe it next tick through
+/// their deferred event path. Receipt handling never changes simulation state.
+fn update_order_feedback(mut order: ResMut<OrderState>, driver: Res<SimulationDriver>) {
+    consume_order_receipt(&mut order, driver.simulation.event_ledger());
+}
+
+fn consume_order_receipt(order: &mut OrderState, events: &[WorldEvent]) {
+    let Some(pending) = order.pending else {
+        return;
+    };
+    let Some(receipt) = deferred_receipt(pending.task, events) else {
+        return;
+    };
+    order.pending = None;
+    order.receipt = Some(receipt);
+}
+
+fn deferred_receipt(task: PlayerTaskId, events: &[WorldEvent]) -> Option<String> {
+    events.iter().find_map(|event| match &event.kind {
+        WorldEventKind::PlayerCommandAccepted { task: received } if *received == task => {
+            Some(format!("Order #{task_id} accepted.", task_id = task.0))
+        }
+        WorldEventKind::PlayerCommandRejected {
+            task: received,
+            reason,
+        } if *received == task => Some(format!(
+            "Order #{task_id} rejected: {reason}.",
+            task_id = task.0,
+            reason = rejection_label(*reason)
+        )),
+        _ => None,
+    })
+}
+
+fn rejection_label(reason: PlayerCommandRejection) -> &'static str {
+    match reason {
+        PlayerCommandRejection::DuplicateTask => "duplicate task",
+        PlayerCommandRejection::InvalidUseTarget => "invalid fixture",
+        PlayerCommandRejection::ResidentBusy => "resident busy",
+        PlayerCommandRejection::UnknownResident => "unknown resident",
+        PlayerCommandRejection::UnknownTask => "unknown task",
+        PlayerCommandRejection::TaskNotCancellable => "task cannot be cancelled",
+    }
+}
+
+fn update_order_feedback_text(
+    order: Res<OrderState>,
+    mut text: Query<&mut Text, With<OrderFeedbackText>>,
+) {
+    if !order.is_changed() {
+        return;
+    }
+    let Ok(mut text) = text.single_mut() else {
+        return;
+    };
+    text.0 = order.pending.map_or_else(
+        || order.receipt.clone().unwrap_or_default(),
+        |pending| format!("Order #{} pending…", pending.task.0),
+    );
+}
+
+fn client_audio_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos() as u64)
+}
+
+fn next_ui_pitch(variation: &mut UiAudioVariation) -> f32 {
+    variation.0 = variation
+        .0
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1);
+    let unit = ((variation.0 >> 40) as f32) / ((1_u32 << 24) as f32 - 1.0);
+    0.94 + unit * 0.12
+}
+
+fn play_ui_click(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    variation: &mut UiAudioVariation,
+) {
+    let sound = if variation.0 & 1 == 0 {
+        "client/audio/click-a.ogg"
+    } else {
+        "client/audio/tap-a.ogg"
+    };
+    commands.spawn((
+        AudioPlayer::new(asset_server.load(sound)),
+        PlaybackSettings::DESPAWN.with_speed(next_ui_pitch(variation)),
+    ));
 }
 
 fn select_resident_from_card(
@@ -900,13 +1110,16 @@ fn workspace_root() -> PathBuf {
 mod tests {
     use village_sim::{
         ClientIntention, ClientPlayerTaskSnapshot, ClientPlayerTaskState, ClientResidentSnapshot,
-        DefinitionId, PlayerTaskId, SimId, TilePosition,
+        DefinitionId, PlayerCommand, PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId,
+        Simulation, TilePosition, WorldEvent, WorldEventKind,
     };
 
     use super::{
-        CottageCamera, FloorVisual, ResidentVisual, SelectedResident, SelectedResidentMarker,
-        apply_floor_focus, bounded_zoom, floor_offset, followed_floor, resident_status_text,
-        rotate_hue, selected_status_text, tile_to_world, update_selected_resident_marker,
+        CottageCamera, FloorVisual, OrderState, PendingOrder, ResidentVisual, SelectedResident,
+        SelectedResidentMarker, UiAudioVariation, apply_floor_focus, bounded_zoom,
+        consume_order_receipt, content_root, deferred_receipt, floor_offset, followed_floor,
+        next_ui_pitch, resident_status_text, rotate_hue, selected_status_text, tile_to_world,
+        update_selected_resident_marker,
     };
     use bevy::prelude::{App, GlobalTransform, Transform, Update, Visibility};
 
@@ -1098,5 +1311,85 @@ mod tests {
             *app.world().entity(marker).get::<Visibility>().unwrap(),
             Visibility::Hidden
         );
+    }
+
+    #[test]
+    fn pending_order_consumes_only_its_own_deferred_receipt() {
+        let task = PlayerTaskId(12);
+        let events = [
+            WorldEvent {
+                tick: 4,
+                kind: WorldEventKind::PlayerCommandAccepted {
+                    task: PlayerTaskId(11),
+                },
+            },
+            WorldEvent {
+                tick: 4,
+                kind: WorldEventKind::PlayerCommandAccepted { task },
+            },
+        ];
+
+        assert_eq!(
+            deferred_receipt(task, &events),
+            Some("Order #12 accepted.".to_owned())
+        );
+    }
+
+    #[test]
+    fn deferred_rejection_has_a_player_readable_reason() {
+        let task = PlayerTaskId(19);
+        let events = [WorldEvent {
+            tick: 5,
+            kind: WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::ResidentBusy,
+            },
+        }];
+
+        assert_eq!(
+            deferred_receipt(task, &events),
+            Some("Order #19 rejected: resident busy.".to_owned())
+        );
+    }
+
+    #[test]
+    fn order_feedback_uses_the_receipt_published_on_its_next_client_advance() {
+        let content = ScenarioContent::load_cottage_arrival(content_root()).expect("fixture loads");
+        let mut simulation = Simulation::from_content(content).expect("fixture resolves");
+        let resident = simulation.cottage_snapshot().residents[0].id;
+        let task = PlayerTaskId(44);
+        let mut order = OrderState {
+            next_task_id: 45,
+            pending: Some(PendingOrder { task }),
+            receipt: None,
+        };
+
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task,
+            resident,
+            object: DefinitionId::new("object.cottage_toilet"),
+            affordance: DefinitionId::new("affordance.use_toilet"),
+            priority: 100,
+        });
+
+        // The receipt is not published until the client performs its next
+        // simulation advance.
+        consume_order_receipt(&mut order, simulation.event_ledger());
+        assert!(order.receipt.is_none());
+        assert!(order.pending.is_some());
+
+        simulation.advance_tick();
+        consume_order_receipt(&mut order, simulation.event_ledger());
+
+        assert_eq!(order.receipt, Some("Order #44 accepted.".to_owned()));
+        assert!(order.pending.is_none());
+    }
+
+    #[test]
+    fn ui_pitch_variation_is_bounded_and_client_local() {
+        let mut variation = UiAudioVariation(7);
+        for _ in 0..32 {
+            assert!((0.94..=1.06).contains(&next_ui_pitch(&mut variation)));
+        }
     }
 }

@@ -184,6 +184,14 @@ entities:
       summary: Cottage camera pan, bounded integer zoom, focused floor, and selected-resident follow are transient Bevy client state. Following derives floor focus from immutable authoritative resident snapshots after portal traversal; it neither mutates nor influences the deterministic simulation.
       references: [village-client, tile-navigation, pixel-art-presentation]
 
+  - decision: cottage-client-order-feedback-and-audio
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Deferred Client Order Feedback and UI Audio
+      summary: The Cottage client owns stable task-ID allocation, pending presentation, and one-time display of immutable deferred command receipts; it submits typed orders but never changes simulation state directly. UI click/tap choice and bounded 0.94x to 1.06x pitch variation use client-local entropy and are never derived from or fed into the simulation seed or ledger.
+      references: [village-client, player-command-boundary, cottage-player-order-cancellation]
+
   - decision: modular-shared-content-assets
     core:
       status: accepted
