@@ -43,7 +43,9 @@ impl Default for CottageCamera {
         Self {
             follow_selected: false,
             focused_floor: 0,
-            zoom: 2,
+            // Start wide enough to read the cottage as a room rather than a
+            // wall-to-wall field of 32px tiles.
+            zoom: 1,
         }
     }
 }
@@ -241,18 +243,18 @@ fn setup_cottage(
     // The authored cottage occupies positive tile coordinates. Centre the
     // initial ground-floor view on its bounds rather than the empty world
     // origin, which otherwise exposes only Bevy's clear colour.
-    let ground_floor = snapshot
-        .floors
+    let starting_centre = snapshot
+        .residents
         .iter()
-        .find(|floor| floor.floor == 0)
-        .expect("Cottage fixture has a ground floor");
+        .map(|resident| {
+            tile_to_world(resident.position.x, resident.position.y)
+                + floor_offset(resident.position.floor)
+        })
+        .reduce(|total, position| total + position)
+        .map_or(Vec2::ZERO, |total| total / snapshot.residents.len() as f32);
     commands.spawn((
         Camera2d,
-        Transform::from_xyz(
-            ground_floor.width as f32 * TILE_PIXELS / 2.0,
-            ground_floor.height as f32 * TILE_PIXELS / 2.0,
-            0.0,
-        ),
+        Transform::from_xyz(starting_centre.x, starting_centre.y, 0.0),
         CottageCameraEntity,
     ));
     commands.spawn((
@@ -363,7 +365,9 @@ fn setup_cottage(
                 furniture.clone(),
                 TextureAtlas {
                     layout: furniture_layout.clone(),
-                    index: 48,
+                    // Row 12, column 0 is the fixture's toilet. Row 4 was
+                    // a wardrobe, which made the supplied toilet read wrong.
+                    index: 144,
                 },
             ),
             Transform::from_xyz(position.x, position.y, 2.0),
@@ -993,7 +997,7 @@ fn pan_and_zoom_camera(
         transform.translation.x =
             (transform.translation.x - delta.x / f32::from(controls.zoom)).round();
         transform.translation.y =
-            (transform.translation.y - delta.y / f32::from(controls.zoom)).round();
+            (transform.translation.y + delta.y / f32::from(controls.zoom)).round();
         drag.0 = Some(current);
         controls.follow_selected = false;
     }

@@ -72,7 +72,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Cottage Playable Client
-      summary: The first runnable Bevy tableau centres its initial ground-floor camera on the fixed Cottage fixture and draws an opaque base layer beneath its two floors, toilet, furniture, and distinct layered newcomer presentations from curated 32px assets. Selection and camera controls are implemented in later playable-client components.
+      summary: The first runnable Bevy tableau centres its initial wide ground-floor view on the newcomer pair and draws an opaque base layer beneath its two floors, an authored toilet atlas cell, furniture, and distinct layered newcomer presentations from curated 32px assets. Selection and camera controls are implemented in later playable-client components.
       references: [village-client, player-command-boundary, pixel-art-presentation]
     implementation:
       status: declared
