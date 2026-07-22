@@ -165,7 +165,7 @@ entities:
       status: accepted
       confidence: confirmed
       title: Curated Cottage Client Assets
-      summary: The playable Cottage client uses a documented, curated subset of the supplied 32px character, interior, furniture, and house assets. Clothing presentation is a separate client-only atlas layer whose derived runtime texture performs HSV hue rotation while preserving alpha and value; it never alters authoritative state.
+      summary: The playable Cottage client resolves its documented, curated subset of 32px character, interior, furniture, and house assets from the shared workspace assets root, including when launched through Cargo. Clothing presentation is a separate client-only atlas layer whose derived runtime texture performs HSV hue rotation while preserving alpha and value; it never alters authoritative state.
       references: [village-client, pixel-art-presentation]
 
   - decision: cottage-client-selection-is-presentation-only
@@ -175,6 +175,14 @@ entities:
       title: Client-Only Resident Selection
       summary: The selected newcomer, their status card, and UI interactions belong entirely to the Bevy client. The card renders only immutable snapshot fields and does not create, alter, or infer simulation state.
       references: [village-client, player-command-boundary]
+
+  - decision: cottage-client-camera-is-presentation-only
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Client-Only Camera and Floor Focus
+      summary: Cottage camera pan, bounded integer zoom, focused floor, and selected-resident follow are transient Bevy client state. Following derives floor focus from immutable authoritative resident snapshots after portal traversal; it neither mutates nor influences the deterministic simulation.
+      references: [village-client, tile-navigation, pixel-art-presentation]
 
   - decision: modular-shared-content-assets
     core:

@@ -72,7 +72,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Cottage Playable Client
-      summary: The first runnable Bevy tableau loads the fixed Cottage fixture through a read-only snapshot, draws its two floors, toilet, furniture, and distinct layered newcomer presentations from curated 32px assets. Input, camera controls, task UI, and audio follow in subsequent playable-client slices.
+      summary: The first runnable Bevy tableau loads the fixed Cottage fixture through a read-only snapshot, draws its two floors, toilet, furniture, and distinct layered newcomer presentations from curated 32px assets. Selection and camera controls are implemented in later playable-client components.
       references: [village-client, player-command-boundary, pixel-art-presentation]
     implementation:
       status: declared
@@ -88,3 +88,14 @@ entities:
     implementation:
       status: declared
       paths: [crates/village_game/src/main.rs, crates/village_sim/src/lib.rs, assets/client/ui]
+
+  - component: cottage-camera-and-floor-focus
+    core:
+      status: implemented
+      confidence: confirmed
+      title: Cottage Camera, Follow, and Floor Focus
+      summary: The client supports right-drag pixel-snapped pan, wheel zoom constrained to integral 1x through 4x display magnifications, manual floor buttons, and a selected-resident follow toggle. Follow changes floor focus from the resident's authoritative tile snapshot after a stair traversal without altering selection or simulation state.
+      references: [village-client, pixel-art-presentation, tile-navigation]
+    implementation:
+      status: declared
+      paths: [crates/village_game/src/main.rs]

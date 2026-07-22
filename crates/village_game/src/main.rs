@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use bevy::prelude::*;
+use bevy::{asset::AssetPlugin, input::mouse::MouseWheel};
 use village_sim::{
     ClientIntention, ClientPlayerTaskState, CottageSnapshot, ScenarioContent, SimId, Simulation,
 };
@@ -23,11 +24,50 @@ struct SimulationDriver {
 #[derive(Default, Resource)]
 struct SelectedResident(Option<SimId>);
 
+/// All camera state is a client resource.  Neither following nor floor focus
+/// is represented in, or fed back to, the deterministic simulation.
+#[derive(Resource)]
+struct CottageCamera {
+    follow_selected: bool,
+    focused_floor: u8,
+    zoom: u8,
+}
+
+#[derive(Default, Resource)]
+struct PanDrag(Option<Vec2>);
+
+impl Default for CottageCamera {
+    fn default() -> Self {
+        Self {
+            follow_selected: false,
+            focused_floor: 0,
+            zoom: 2,
+        }
+    }
+}
+
+#[derive(Component)]
+struct CottageCameraEntity;
+
+/// A world sprite that belongs to one cottage storey. UI deliberately never
+/// receives this component.
+#[derive(Component)]
+struct FloorVisual(u8);
+
 #[derive(Component)]
 struct ResidentSelector(SimId);
 
 #[derive(Component)]
 struct StatusCardText;
+
+#[derive(Component)]
+enum CameraControlButton {
+    Follow,
+    Floor(u8),
+}
+
+#[derive(Component)]
+struct FollowButtonText;
 
 /// A client-only ground highlight for the currently inspected newcomer.
 #[derive(Component)]
@@ -53,7 +93,17 @@ struct ClothingHue {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
+        .add_plugins(
+            DefaultPlugins
+                .set(ImagePlugin::default_nearest())
+                .set(AssetPlugin {
+                    file_path: workspace_root()
+                        .join("assets")
+                        .to_string_lossy()
+                        .into_owned(),
+                    ..default()
+                }),
+        )
         .add_systems(Startup, setup_cottage)
         .add_systems(
             Update,
@@ -64,9 +114,16 @@ fn main() {
                 animate_walking,
                 select_resident_from_sprite,
                 select_resident_from_card,
+                update_camera_controls,
+                update_camera_control_labels,
+                pan_and_zoom_camera,
+                follow_selected_resident,
+                update_resident_floor_layers,
                 update_selected_resident_marker,
+                apply_floor_focus,
                 update_status_card,
-            ),
+            )
+                .chain(),
         )
         .run();
 }
@@ -91,7 +148,9 @@ fn setup_cottage(
         ),
     });
     commands.insert_resource(SelectedResident::default());
-    commands.spawn(Camera2d);
+    commands.insert_resource(CottageCamera::default());
+    commands.insert_resource(PanDrag::default());
+    commands.spawn((Camera2d, CottageCameraEntity));
     commands.spawn((
         Sprite::from_color(
             Color::srgba(0.95, 0.8, 0.2, 0.45),
@@ -100,6 +159,7 @@ fn setup_cottage(
         Transform::from_xyz(0.0, 0.0, 3.0),
         Visibility::Hidden,
         SelectedResidentMarker,
+        FloorVisual(0),
     ));
     let house = asset_server.load("client/tiles/house_tiles.png");
     let house_layout = layouts.add(TextureAtlasLayout::from_grid(
@@ -158,6 +218,7 @@ fn setup_cottage(
             Name::new(resident.display_name.clone()),
             ResidentVisual { id: resident.id },
             WalkFrames { first_index: 0 },
+            FloorVisual(resident.position.floor),
         ));
         // The clothing is a separate transparent atlas row. It gets a private
         // hue-rotated image at runtime; the body sprite always keeps the
@@ -178,6 +239,7 @@ fn setup_cottage(
             ClothingHue {
                 degrees: clothing_hue,
             },
+            FloorVisual(resident.position.floor),
         ));
     }
 
@@ -190,7 +252,8 @@ fn setup_cottage(
         None,
     ));
     for object in &snapshot.objects {
-        let position = tile_to_world(object.position.x, object.position.y);
+        let position = tile_to_world(object.position.x, object.position.y)
+            + floor_offset(object.position.floor);
         commands.spawn((
             Sprite::from_atlas_image(
                 furniture.clone(),
@@ -201,6 +264,7 @@ fn setup_cottage(
             ),
             Transform::from_xyz(position.x, position.y, 2.0),
             Name::new(object.id.0.clone()),
+            FloorVisual(object.position.floor),
         ));
     }
 
@@ -263,6 +327,51 @@ fn spawn_status_card(
                     TextColor(Color::srgb(0.04, 0.08, 0.12)),
                 ));
             }
+            card.spawn((
+                Button,
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Px(32.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                ImageNode::new(button.clone()),
+                CameraControlButton::Follow,
+            ))
+            .with_child((
+                Text::new("Follow selected: off"),
+                TextFont {
+                    font: font.clone(),
+                    font_size: 16.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.04, 0.08, 0.12)),
+                FollowButtonText,
+            ));
+            for (floor, label) in [(0, "Ground floor"), (1, "Upstairs")] {
+                card.spawn((
+                    Button,
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(28.0),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    ImageNode::new(button.clone()),
+                    CameraControlButton::Floor(floor),
+                ))
+                .with_child((
+                    Text::new(label),
+                    TextFont {
+                        font: font.clone(),
+                        font_size: 15.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.04, 0.08, 0.12)),
+                ));
+            }
         });
 }
 
@@ -277,11 +386,179 @@ fn select_resident_from_card(
     }
 }
 
+fn update_camera_controls(
+    mut controls: ResMut<CottageCamera>,
+    buttons: Query<(&Interaction, &CameraControlButton), Changed<Interaction>>,
+) {
+    for (interaction, button) in &buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match *button {
+            CameraControlButton::Follow => controls.follow_selected = !controls.follow_selected,
+            CameraControlButton::Floor(floor) => {
+                controls.focused_floor = floor;
+                // A manual floor choice is an explicit request to explore,
+                // rather than to remain locked onto the selected newcomer.
+                controls.follow_selected = false;
+            }
+        }
+    }
+}
+
+fn update_camera_control_labels(
+    controls: Res<CottageCamera>,
+    mut labels: Query<&mut Text, With<FollowButtonText>>,
+) {
+    if !controls.is_changed() {
+        return;
+    }
+    for mut label in &mut labels {
+        label.0 = format!(
+            "Follow selected: {}",
+            if controls.follow_selected {
+                "on"
+            } else {
+                "off"
+            }
+        );
+    }
+}
+
+/// Right-drag pans the view. The wheel moves through only integral display
+/// magnifications (1x–4x), so a source pixel is never filtered into a partial
+/// display pixel.
+fn pan_and_zoom_camera(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    mut wheel: MessageReader<MouseWheel>,
+    mut drag: ResMut<PanDrag>,
+    mut controls: ResMut<CottageCamera>,
+    mut camera: Query<(&mut Transform, &mut Projection), With<CottageCameraEntity>>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Ok((mut transform, mut projection)) = camera.single_mut() else {
+        return;
+    };
+
+    let scroll: f32 = wheel.read().map(|event| event.y).sum();
+    if scroll != 0.0 {
+        controls.zoom = bounded_zoom(controls.zoom, scroll);
+    }
+    if let Projection::Orthographic(orthographic) = &mut *projection {
+        orthographic.scale = 1.0 / f32::from(controls.zoom);
+    }
+
+    let cursor = window.cursor_position();
+    if mouse.just_pressed(MouseButton::Right) {
+        drag.0 = cursor;
+    }
+    if mouse.pressed(MouseButton::Right)
+        && let (Some(previous), Some(current)) = (drag.0, cursor)
+    {
+        let delta = current - previous;
+        // Projection scale maps viewport pixels into world pixels here.
+        transform.translation.x =
+            (transform.translation.x - delta.x / f32::from(controls.zoom)).round();
+        transform.translation.y =
+            (transform.translation.y - delta.y / f32::from(controls.zoom)).round();
+        drag.0 = Some(current);
+        controls.follow_selected = false;
+    }
+    if mouse.just_released(MouseButton::Right) {
+        drag.0 = None;
+    }
+}
+
+fn bounded_zoom(current: u8, scroll: f32) -> u8 {
+    let step = if scroll.is_sign_positive() { 1 } else { -1 };
+    (i16::from(current) + step).clamp(1, 4) as u8
+}
+
+/// The authoritative current position, rather than an interpolated render
+/// coordinate, determines which storey a following camera presents.
+fn followed_floor(authoritative_floor: u8) -> u8 {
+    authoritative_floor.min(1)
+}
+
+fn follow_selected_resident(
+    mut controls: ResMut<CottageCamera>,
+    selected: Res<SelectedResident>,
+    driver: Res<SimulationDriver>,
+    residents: Query<(&ResidentVisual, &GlobalTransform)>,
+    mut camera: Query<&mut Transform, With<CottageCameraEntity>>,
+) {
+    if !controls.follow_selected {
+        return;
+    }
+    let Some(id) = selected.0 else {
+        return;
+    };
+    let Some(snapshot) = driver
+        .current
+        .residents
+        .iter()
+        .find(|resident| resident.id == id)
+    else {
+        return;
+    };
+    // A selected resident changes the visible storey as soon as their
+    // authoritative snapshot reports arrival through the stair portal.
+    controls.focused_floor = followed_floor(snapshot.position.floor);
+    let Some((_, resident)) = residents.iter().find(|(visual, _)| visual.id == id) else {
+        return;
+    };
+    let Ok(mut camera) = camera.single_mut() else {
+        return;
+    };
+    camera.translation.x = resident.translation().x.round();
+    camera.translation.y = resident.translation().y.round();
+}
+
+fn update_resident_floor_layers(
+    driver: Res<SimulationDriver>,
+    mut layers: Query<(&ResidentVisual, &mut FloorVisual)>,
+) {
+    for (visual, mut floor) in &mut layers {
+        if let Some(resident) = driver
+            .current
+            .residents
+            .iter()
+            .find(|resident| resident.id == visual.id)
+        {
+            floor.0 = resident.position.floor;
+        }
+    }
+}
+
+fn apply_floor_focus(
+    controls: Res<CottageCamera>,
+    mut visuals: Query<(Ref<FloorVisual>, &mut Visibility)>,
+) {
+    // A resident's authoritative snapshot can move it through a stair portal
+    // while camera focus itself remains unchanged (for example, when follow
+    // is off). In that case its `FloorVisual` changes and must immediately
+    // receive the current focus visibility as well.
+    let floor_changed = visuals.iter().any(|(floor, _)| floor.is_changed());
+    if !controls.is_changed() && !floor_changed {
+        return;
+    }
+    for (floor, mut visibility) in &mut visuals {
+        *visibility = if floor.0 == controls.focused_floor {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
 fn select_resident_from_sprite(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     camera: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
-    residents: Query<(&ResidentVisual, &GlobalTransform)>,
+    residents: Query<(&ResidentVisual, &GlobalTransform, &Visibility)>,
     mut selected: ResMut<SelectedResident>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
@@ -301,7 +578,10 @@ fn select_resident_from_sprite(
     };
     let selected_id = residents
         .iter()
-        .filter_map(|(resident, transform)| {
+        .filter_map(|(resident, transform, visibility)| {
+            if *visibility != Visibility::Visible {
+                return None;
+            }
             let distance = transform.translation().truncate().distance(world);
             (distance <= TILE_PIXELS * 0.65).then_some((resident.id, distance))
         })
@@ -312,26 +592,53 @@ fn select_resident_from_sprite(
     }
 }
 
+#[allow(clippy::type_complexity)] // The ParamSet guarantees the marker write is disjoint.
 fn update_selected_resident_marker(
     selected: Res<SelectedResident>,
-    residents: Query<(&ResidentVisual, &GlobalTransform)>,
-    mut marker: Query<(&mut Transform, &mut Visibility), With<SelectedResidentMarker>>,
+    controls: Res<CottageCamera>,
+    mut visuals: ParamSet<(
+        Query<(&ResidentVisual, &GlobalTransform, &FloorVisual), Without<SelectedResidentMarker>>,
+        Query<(&mut Transform, &mut Visibility, &mut FloorVisual), With<SelectedResidentMarker>>,
+    )>,
 ) {
-    let Ok((mut transform, mut visibility)) = marker.single_mut() else {
-        return;
-    };
     let Some(id) = selected.0 else {
-        *visibility = Visibility::Hidden;
+        if let Ok((_, mut visibility, _)) = visuals.p1().single_mut() {
+            *visibility = Visibility::Hidden;
+        }
         return;
     };
-    let Some((_, resident_transform)) = residents.iter().find(|(resident, _)| resident.id == id)
+    let Some((_, resident_transform, resident_floor)) = visuals
+        .p0()
+        .iter()
+        .find(|(resident, _, _)| resident.id == id)
+        .map(|(resident, transform, floor)| (resident.id, transform.compute_transform(), floor.0))
     else {
-        *visibility = Visibility::Hidden;
+        if let Ok((_, mut visibility, _)) = visuals.p1().single_mut() {
+            *visibility = Visibility::Hidden;
+        }
         return;
     };
-    transform.translation = resident_transform.translation();
+    let mut markers = visuals.p1();
+    let Ok((mut transform, mut visibility, mut floor)) = markers.single_mut() else {
+        return;
+    };
+    transform.translation = resident_transform.translation;
     transform.translation.z = 3.0;
-    *visibility = Visibility::Visible;
+    // The transform is deliberately interpolated between snapshots, and can
+    // therefore still be drawn on the old storey while a resident has already
+    // crossed a stair portal. The resident visual floor is updated from the
+    // authoritative snapshot before this system runs, so use it rather than
+    // inferring a floor from rendered coordinates.
+    floor.0 = resident_floor;
+    // The marker is a separate visual from the resident layers, so it does
+    // not inherit `apply_floor_focus`. Keep it on the same visible storey as
+    // its resident; selecting someone on an unfocused floor must not reveal
+    // a stray highlight through the house.
+    *visibility = if floor.0 == controls.focused_floor {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
 }
 
 fn update_status_card(
@@ -384,15 +691,13 @@ fn resident_status_text(resident: &village_sim::ClientResidentSnapshot) -> Strin
 /// which prevents this asset from ever being used to recolour hair or skin.
 fn bake_clothing_hues(
     mut commands: Commands,
-    source_images: Res<Assets<Image>>,
-    mut generated_images: ResMut<Assets<Image>>,
+    mut images: ResMut<Assets<Image>>,
     mut clothing: Query<(Entity, &ClothingHue, &mut Sprite)>,
 ) {
     for (entity, hue, mut sprite) in &mut clothing {
-        let Some(source) = source_images.get(&sprite.image) else {
+        let Some(mut recoloured) = images.get(&sprite.image).cloned() else {
             continue;
         };
-        let mut recoloured = source.clone();
         let size = recoloured.texture_descriptor.size;
         let row_height = size.height / 12;
         let clothing_row = (CLOTHING_FIRST_INDEX as u32 / CHARACTER_COLUMNS) * row_height;
@@ -417,7 +722,7 @@ fn bake_clothing_hues(
                 }
             }
         }
-        sprite.image = generated_images.add(recoloured);
+        sprite.image = images.add(recoloured);
         commands.entity(entity).remove::<ClothingHue>();
     }
 }
@@ -570,6 +875,7 @@ fn spawn_floor(
                     },
                 ),
                 Transform::from_xyz(position.x, position.y, 0.0),
+                FloorVisual(floor),
             ));
         }
     }
@@ -583,7 +889,11 @@ fn tile_to_world(x: i32, y: i32) -> Vec2 {
 }
 
 fn content_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/content")
+    workspace_root().join("assets/content")
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 #[cfg(test)]
@@ -593,7 +903,12 @@ mod tests {
         DefinitionId, PlayerTaskId, SimId, TilePosition,
     };
 
-    use super::{resident_status_text, rotate_hue, selected_status_text, tile_to_world};
+    use super::{
+        CottageCamera, FloorVisual, ResidentVisual, SelectedResident, SelectedResidentMarker,
+        apply_floor_focus, bounded_zoom, floor_offset, followed_floor, resident_status_text,
+        rotate_hue, selected_status_text, tile_to_world, update_selected_resident_marker,
+    };
+    use bevy::prelude::{App, GlobalTransform, Transform, Update, Visibility};
 
     #[test]
     fn tiles_project_to_their_pixel_centres() {
@@ -648,6 +963,140 @@ mod tests {
         assert_eq!(
             selected_status_text(None, &snapshot),
             "Select a newcomer to inspect them."
+        );
+    }
+
+    #[test]
+    fn camera_zoom_is_bounded_to_integral_pixel_scales() {
+        assert_eq!(bounded_zoom(1, -1.0), 1);
+        assert_eq!(bounded_zoom(4, 1.0), 4);
+        assert_eq!(bounded_zoom(2, 1.0), 3);
+    }
+
+    #[test]
+    fn follow_uses_authoritative_destination_floor() {
+        assert_eq!(followed_floor(0), 0);
+        assert_eq!(followed_floor(1), 1);
+    }
+
+    #[test]
+    fn focused_floor_visibility_updates_when_authoritative_floor_changes() {
+        let mut app = App::new();
+        app.insert_resource(CottageCamera {
+            follow_selected: false,
+            focused_floor: 1,
+            zoom: 2,
+        });
+        app.add_systems(Update, apply_floor_focus);
+        let resident = app
+            .world_mut()
+            .spawn((FloorVisual(0), Visibility::Visible))
+            .id();
+
+        // Establish the initial state, then change only the visual floor as
+        // `update_resident_floor_layers` does after a simulation snapshot.
+        app.update();
+        app.world_mut().clear_trackers();
+        app.world_mut()
+            .entity_mut(resident)
+            .get_mut::<FloorVisual>()
+            .unwrap()
+            .0 = 1;
+        app.update();
+
+        assert_eq!(
+            *app.world().entity(resident).get::<Visibility>().unwrap(),
+            Visibility::Visible
+        );
+    }
+
+    #[test]
+    fn selected_marker_stays_hidden_when_its_floor_is_not_focused() {
+        let mut app = App::new();
+        app.insert_resource(CottageCamera {
+            follow_selected: false,
+            focused_floor: 0,
+            zoom: 2,
+        });
+        app.insert_resource(SelectedResident(Some(SimId(1))));
+        app.add_systems(Update, update_selected_resident_marker);
+        app.world_mut().spawn((
+            ResidentVisual { id: SimId(1) },
+            GlobalTransform::from(Transform::from_xyz(16.0, floor_offset(1).y + 16.0, 1.0)),
+            FloorVisual(1),
+        ));
+        let marker = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                Visibility::Hidden,
+                SelectedResidentMarker,
+                FloorVisual(0),
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            *app.world().entity(marker).get::<Visibility>().unwrap(),
+            Visibility::Hidden
+        );
+    }
+
+    #[test]
+    fn selected_marker_uses_authoritative_floor_during_stair_transition() {
+        let mut app = App::new();
+        // This is the focus a following camera adopts as soon as the current
+        // snapshot reports the resident through the stair portal.
+        app.insert_resource(CottageCamera {
+            follow_selected: true,
+            focused_floor: 1,
+            zoom: 2,
+        });
+        app.insert_resource(SelectedResident(Some(SimId(1))));
+        app.add_systems(Update, update_selected_resident_marker);
+        // Interpolation is still visibly on the ground floor, but the
+        // authoritative floor layer has already moved to the upper storey.
+        app.world_mut().spawn((
+            ResidentVisual { id: SimId(1) },
+            GlobalTransform::from(Transform::from_xyz(16.0, 16.0, 1.0)),
+            FloorVisual(1),
+        ));
+        let marker = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                Visibility::Hidden,
+                SelectedResidentMarker,
+                FloorVisual(0),
+            ))
+            .id();
+
+        app.update();
+
+        assert_eq!(
+            app.world().entity(marker).get::<FloorVisual>().unwrap().0,
+            1
+        );
+        assert_eq!(
+            *app.world().entity(marker).get::<Visibility>().unwrap(),
+            Visibility::Visible
+        );
+
+        // Manually returning focus to the ground floor must hide the same
+        // upper-storey marker, rather than leaving a stale visual behind.
+        app.world_mut()
+            .resource_mut::<CottageCamera>()
+            .focused_floor = 0;
+        app.update();
+
+        assert_eq!(
+            app.world().entity(marker).get::<FloorVisual>().unwrap().0,
+            1
+        );
+        assert_eq!(
+            *app.world().entity(marker).get::<Visibility>().unwrap(),
+            Visibility::Hidden
         );
     }
 }
