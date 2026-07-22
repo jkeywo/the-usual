@@ -6,8 +6,8 @@
             needs: [
                 (
                     kind: Toilet,
-                    initial: 0,
-                    decay_per_tick: 0,
+                    initial: 10,
+                    decay_per_tick: 1,
                     activate_at: 50,
                     retain_above: 20,
                     recovery: 100,

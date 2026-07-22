@@ -31,7 +31,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Cottage Needs and Affordances
-      summary: "The first interaction is a data-defined contested toilet: its authored affordance claims a named slot and hands only while executing. A deliberately narrow scalar Toilet need decays, selects a Human conduct method through a named RON plan with intention-owned hysteresis, and recovers only when ObjectUseCompleted. Explicit player work suppresses competing autonomous requests. The remaining household interactions and need motivation remain later MVP work."
+      summary: "The first interaction is a data-defined contested toilet: its authored affordance claims a named slot and hands only while executing. Rowan begins with a decaying Toilet need; on activation the Human plan physically navigates to the authored toilet tile, then contends, uses it, and recovers only when ObjectUseCompleted. Explicit player work suppresses competing autonomous requests. The remaining household interactions and need motivation remain later MVP work."
       references: [smart-objects, initial-needs-and-recipes]
     implementation:
       status: declared
@@ -121,3 +121,14 @@ entities:
     implementation:
       status: declared
       paths: [crates/village_game/src/main.rs, crates/village_sim/src/lib.rs]
+
+  - component: cottage-physical-toilet-and-player-move
+    core:
+      status: implemented
+      confidence: confirmed
+      title: Physical Toilet Need and Right-Click Move
+      summary: Rowan begins with an authored decaying Toilet need. On activation, the autonomous Human plan navigates to the authored toilet tile before entering normal contention and use; recovery still follows ObjectUseCompleted only. Selecting a newcomer and short right-clicking visible ground submits a deferred typed QueueGoTo task for that tile, while right-drag remains camera pan.
+      references: [agent-autonomy, tile-navigation, player-command-boundary, cottage-needs-and-affordances]
+    implementation:
+      status: declared
+      paths: [assets/content/people/newcomers.ron, assets/content/objects/cottage.ron, crates/village_sim/src/lib.rs, crates/village_game/src/main.rs]

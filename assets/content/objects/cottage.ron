@@ -3,7 +3,7 @@
         (
             id: "object.cottage_toilet",
             object_type: "object_type.toilet",
-            position: (floor: 0, x: 3, y: 2),
+            position: (floor: 0, x: 3, y: 1),
             slots: [(id: "slot.use")],
             affordances: [
                 (

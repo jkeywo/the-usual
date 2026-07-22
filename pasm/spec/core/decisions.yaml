@@ -168,6 +168,14 @@ entities:
       summary: The playable Cottage client resolves its documented, curated subset of 32px character, interior, furniture, and house assets from the shared workspace assets root, including when launched through Cargo. Clothing presentation is a separate client-only atlas layer whose derived runtime texture performs HSV hue rotation while preserving alpha and value; it never alters authoritative state.
       references: [village-client, pixel-art-presentation]
 
+  - decision: player-ground-move-command
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Deferred Ground Move Command
+      summary: A selected household resident receives a typed QueueGoTo command from a short right-click on the focused floor. The simulation validates the destination and uses ordinary live-occupancy navigation; right-drag remains a client-only camera gesture.
+      references: [player-command-boundary, tile-navigation, village-client]
+
   - decision: cottage-client-selection-is-presentation-only
     core:
       status: accepted

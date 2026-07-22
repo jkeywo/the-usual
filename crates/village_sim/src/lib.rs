@@ -370,6 +370,12 @@ struct ToiletPlan {
 /// tick's ingest phase.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum PlayerCommand {
+    QueueGoTo {
+        task: PlayerTaskId,
+        resident: SimId,
+        destination: TilePosition,
+        priority: i32,
+    },
     QueueUseToilet {
         task: PlayerTaskId,
         resident: SimId,
@@ -386,7 +392,9 @@ impl PlayerCommand {
     #[must_use]
     pub fn task(&self) -> PlayerTaskId {
         match self {
-            Self::QueueUseToilet { task, .. } | Self::CancelPlayerTask { task } => *task,
+            Self::QueueGoTo { task, .. }
+            | Self::QueueUseToilet { task, .. }
+            | Self::CancelPlayerTask { task } => *task,
         }
     }
 }
@@ -395,6 +403,7 @@ impl PlayerCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum PlayerCommandRejection {
     DuplicateTask,
+    InvalidMoveTarget,
     InvalidUseTarget,
     ResidentBusy,
     UnknownResident,
@@ -1012,6 +1021,20 @@ impl Simulation {
                 .get(&resident)
                 .expect("every toilet need has a resolved conduct plan")
                 .clone();
+            let destination = self
+                .objects
+                .get(&plan.object)
+                .expect("resolved toilet plan names a loaded object")
+                .position;
+            // A need intention is a physical plan: first reach the object,
+            // then enter the ordinary claim/use path. Object use itself stays
+            // claim-based, but no longer happens from across the cottage.
+            if self.resident_position(resident) != Some(destination) {
+                if !self.go_to.contains_key(&resident) {
+                    let _ = self.begin_go_to_with_priority(resident, destination, plan.priority);
+                }
+                continue;
+            }
             let _ = self.begin_use_object(resident, &plan.object, &plan.affordance, plan.priority);
         }
     }
@@ -1030,6 +1053,12 @@ impl Simulation {
         let commands = std::mem::take(&mut self.player_command_inbox);
         for command in commands {
             match command {
+                PlayerCommand::QueueGoTo {
+                    task,
+                    resident,
+                    destination,
+                    priority,
+                } => self.ingest_queue_go_to(task, resident, destination, priority),
                 PlayerCommand::QueueUseToilet {
                     task,
                     resident,
@@ -1039,6 +1068,44 @@ impl Simulation {
                 } => self.ingest_queue_use_toilet(task, resident, object, affordance, priority),
                 PlayerCommand::CancelPlayerTask { task } => self.ingest_cancel_player_task(task),
             }
+        }
+    }
+
+    fn ingest_queue_go_to(
+        &mut self,
+        task: PlayerTaskId,
+        resident: SimId,
+        destination: TilePosition,
+        priority: i32,
+    ) {
+        if self.player_tasks.contains_key(&task) {
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::DuplicateTask,
+            });
+            return;
+        }
+        if !self.residents.contains_key(&resident) {
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::UnknownResident,
+            });
+            return;
+        }
+        if !self.is_walkable(destination) || self.go_to.contains_key(&resident) {
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::InvalidMoveTarget,
+            });
+            return;
+        }
+        if self.begin_go_to_with_priority(resident, destination, priority) {
+            self.emit(WorldEventKind::PlayerCommandAccepted { task });
+        } else {
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::InvalidMoveTarget,
+            });
         }
     }
 
@@ -2246,7 +2313,25 @@ mod tests {
         simulation.advance_tick();
 
         assert!(simulation.has_autonomous_toilet_intention(SimId(1)));
-        assert_eq!(simulation.toilet_need(SimId(1)), Some(50));
+        assert_eq!(simulation.toilet_need(SimId(1)), Some(51));
+        assert_eq!(
+            simulation.resident_position(SimId(1)),
+            Some(TilePosition {
+                floor: 0,
+                x: 2,
+                y: 1
+            })
+        );
+        simulation.advance_tick();
+        assert_eq!(
+            simulation.resident_position(SimId(1)),
+            Some(TilePosition {
+                floor: 0,
+                x: 3,
+                y: 1
+            })
+        );
+        simulation.advance_tick();
         assert_eq!(
             simulation.object_slot_claimant(&toilet, &slot),
             Some(SimId(1))
@@ -2278,7 +2363,7 @@ mod tests {
         simulation.advance_tick();
 
         let resident = &simulation.cottage_snapshot().residents[0];
-        assert_eq!(resident.toilet_need, Some(50));
+        assert_eq!(resident.toilet_need, Some(51));
         assert_eq!(resident.autonomous_intention, Some(ClientIntention::Toilet));
         assert_eq!(resident.player_task, None);
 
@@ -2314,7 +2399,7 @@ mod tests {
         simulation.advance_tick();
         simulation.advance_tick();
 
-        assert_eq!(simulation.toilet_need(SimId(1)), Some(30));
+        assert_eq!(simulation.toilet_need(SimId(1)), Some(32));
         assert!(!simulation.event_ledger().iter().any(|event| {
             matches!(
                 event.kind,
@@ -2368,6 +2453,42 @@ mod tests {
     }
 
     #[test]
+    fn deferred_player_ground_move_uses_the_live_navigation_path() {
+        let mut simulation = load_simulation();
+        let task = PlayerTaskId(56);
+        let destination = TilePosition {
+            floor: 0,
+            x: 4,
+            y: 1,
+        };
+        simulation.submit_player_command(PlayerCommand::QueueGoTo {
+            task,
+            resident: SimId(1),
+            destination,
+            priority: 100,
+        });
+
+        for _ in 0..3 {
+            simulation.advance_tick();
+        }
+
+        assert_eq!(simulation.resident_position(SimId(1)), Some(destination));
+        assert!(
+            simulation
+                .event_ledger()
+                .iter()
+                .any(|event| { event.kind == WorldEventKind::PlayerCommandAccepted { task } })
+        );
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::GoToArrived {
+                    resident: SimId(1),
+                    destination,
+                }
+        }));
+    }
+
+    #[test]
     fn toilet_intention_uses_its_own_hysteresis_before_completion_recovers_it() {
         let mut simulation = load_simulation();
         assert!(simulation.set_toilet_need(SimId(1), 50));
@@ -2376,7 +2497,9 @@ mod tests {
         assert!(simulation.has_autonomous_toilet_intention(SimId(1)));
         assert!(simulation.set_toilet_need(SimId(1), 21));
 
-        simulation.advance_tick();
+        for _ in 0..3 {
+            simulation.advance_tick();
+        }
         // It remains selected below the activation threshold because its
         // lower retention threshold belongs to the current intention.
         assert!(simulation.has_autonomous_toilet_intention(SimId(1)));

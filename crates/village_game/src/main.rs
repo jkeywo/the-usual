@@ -6,8 +6,8 @@ use bevy::prelude::*;
 use bevy::{asset::AssetPlugin, input::mouse::MouseWheel};
 use village_sim::{
     ClientIntention, ClientPlayerTaskState, CottageSnapshot, DefinitionId, PlayerCommand,
-    PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId, Simulation, WorldEvent,
-    WorldEventKind,
+    PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId, Simulation, TilePosition,
+    WorldEvent, WorldEventKind,
 };
 
 const TILE_PIXELS: f32 = 32.0;
@@ -182,6 +182,7 @@ fn main() {
                     animate_walking,
                     select_resident_from_sprite,
                     select_resident_from_card,
+                    queue_selected_go_to,
                     submit_selected_toilet_order,
                     submit_selected_task_cancellation,
                 )
@@ -725,6 +726,7 @@ fn pending_action_label(action: PendingAction) -> &'static str {
 fn rejection_label(reason: PlayerCommandRejection) -> &'static str {
     match reason {
         PlayerCommandRejection::DuplicateTask => "duplicate task",
+        PlayerCommandRejection::InvalidMoveTarget => "unreachable tile",
         PlayerCommandRejection::InvalidUseTarget => "invalid fixture",
         PlayerCommandRejection::ResidentBusy => "resident busy",
         PlayerCommandRejection::UnknownResident => "unknown resident",
@@ -1124,6 +1126,64 @@ fn select_resident_from_sprite(
     if selected_id.is_some() {
         selected.0 = selected_id;
     }
+}
+
+/// A short right click on visible ground creates an ordinary typed movement
+/// task for the selected newcomer. Right-drag remains camera panning.
+#[allow(clippy::too_many_arguments)] // Input, camera, simulation, and UI state stay separate resources.
+fn queue_selected_go_to(
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera: Query<(&Camera, &GlobalTransform), With<CottageCameraEntity>>,
+    drag: Res<PanDrag>,
+    controls: Res<CottageCamera>,
+    selected: Res<SelectedResident>,
+    mut driver: ResMut<SimulationDriver>,
+    mut order: ResMut<OrderState>,
+) {
+    if !mouse.just_released(MouseButton::Right) || order.pending.is_some() {
+        return;
+    }
+    let (Some(resident), Some(start)) = (selected.0, drag.0) else {
+        return;
+    };
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    if cursor.distance(start) > 4.0 {
+        return;
+    }
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
+    let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
+        return;
+    };
+    let local = world - floor_offset(controls.focused_floor);
+    let destination = TilePosition {
+        floor: controls.focused_floor,
+        x: (local.x / TILE_PIXELS).floor() as i32,
+        y: (local.y / TILE_PIXELS).floor() as i32,
+    };
+    let task = PlayerTaskId(order.next_task_id);
+    order.next_task_id += 1;
+    driver
+        .simulation
+        .submit_player_command(PlayerCommand::QueueGoTo {
+            task,
+            resident,
+            destination,
+            priority: 100,
+        });
+    order.pending = Some(PendingOrder {
+        task,
+        action: PendingAction::Order,
+        receipt_start: driver.simulation.event_ledger().len(),
+    });
+    order.receipt = None;
 }
 
 #[allow(clippy::type_complexity)] // The ParamSet guarantees the marker write is disjoint.
