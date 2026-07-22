@@ -110,3 +110,14 @@ entities:
     implementation:
       status: declared
       paths: [crates/village_game/src/main.rs, crates/village_sim/src/lib.rs, assets/client/audio]
+
+  - component: cottage-player-task-cancellation-feedback
+    core:
+      status: implemented
+      confidence: confirmed
+      title: Contended Player Task Cancellation Feedback
+      summary: The selected newcomer exposes Cancel only while their immutable Cottage snapshot has a queued or active player task. The client submits CancelPlayerTask at the normal deferred boundary, names its receipt as a cancellation, and consumes semantic waiting, start, completion, and cancellation events from the append-only ledger once. Active cancellation visibly reports that the toilet was released, after which the waiting request can progress under simulation authority.
+      references: [village-client, player-command-boundary, cottage-player-order-cancellation]
+    implementation:
+      status: declared
+      paths: [crates/village_game/src/main.rs, crates/village_sim/src/lib.rs]

@@ -1,6 +1,6 @@
 //! Read-only Bevy presentation for the Cottage Contention fixture.
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use bevy::prelude::*;
 use bevy::{asset::AssetPlugin, input::mouse::MouseWheel};
@@ -68,6 +68,12 @@ struct OrderFeedbackText;
 #[derive(Component)]
 struct UseToiletButton;
 
+#[derive(Component)]
+struct CancelPlayerTaskButton;
+
+#[derive(Component)]
+struct SemanticEventFeedText;
+
 /// Allocates task IDs in the client only. An allocated ID is retained by the
 /// pending order until the simulation publishes its immutable receipt.
 #[derive(Default, Resource)]
@@ -75,11 +81,43 @@ struct OrderState {
     next_task_id: u64,
     pending: Option<PendingOrder>,
     receipt: Option<String>,
+    /// Cancellation outcomes must be remembered after the deferred command
+    /// receipt has cleared `pending`: `TaskCancelled` is the semantic event
+    /// which tells the player what was actually released.
+    cancellation_outcomes: BTreeMap<PlayerTaskId, CancellationOutcome>,
 }
 
 #[derive(Clone, Copy)]
 struct PendingOrder {
     task: PlayerTaskId,
+    action: PendingAction,
+    /// The immutable ledger length at submission. A cancellation shares its
+    /// task ID with its already accepted order, so only later events can be
+    /// its own deferred receipt.
+    receipt_start: usize,
+}
+
+#[derive(Clone, Copy)]
+enum PendingAction {
+    Order,
+    Cancellation(CancellationOutcome),
+}
+
+/// The authoritative task state at the instant the player asked to cancel.
+/// It is presentation context only; the cancel command still goes through the
+/// simulation and is validated there on its next tick.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CancellationOutcome {
+    Queued,
+    Active,
+}
+
+/// Cursor for the append-only immutable event ledger. This keeps display
+/// messages one-time while preserving the ledger for simulation assertions.
+#[derive(Default, Resource)]
+struct SemanticEventFeed {
+    consumed_events: usize,
+    entries: Vec<String>,
 }
 
 /// This state deliberately does not share the simulation seed. UI pitch is
@@ -135,23 +173,37 @@ fn main() {
         .add_systems(
             Update,
             (
-                bake_clothing_hues,
-                advance_simulation,
-                interpolate_residents,
-                animate_walking,
-                select_resident_from_sprite,
-                select_resident_from_card,
-                submit_selected_toilet_order,
-                update_camera_controls,
-                update_camera_control_labels,
-                pan_and_zoom_camera,
-                follow_selected_resident,
-                update_resident_floor_layers,
-                update_selected_resident_marker,
-                apply_floor_focus,
-                update_status_card,
-                update_order_feedback,
-                update_order_feedback_text,
+                (
+                    bake_clothing_hues,
+                    advance_simulation,
+                    interpolate_residents,
+                    animate_walking,
+                    select_resident_from_sprite,
+                    select_resident_from_card,
+                    submit_selected_toilet_order,
+                    submit_selected_task_cancellation,
+                )
+                    .chain(),
+                (
+                    update_camera_controls,
+                    update_camera_control_labels,
+                    pan_and_zoom_camera,
+                    follow_selected_resident,
+                    update_resident_floor_layers,
+                    update_selected_resident_marker,
+                    apply_floor_focus,
+                )
+                    .chain(),
+                (
+                    update_status_card,
+                    update_order_feedback,
+                    update_order_feedback_text,
+                    correct_pending_action_feedback_text,
+                    update_cancel_button,
+                    update_semantic_event_feed,
+                    update_semantic_event_feed_text,
+                )
+                    .chain(),
             )
                 .chain(),
         )
@@ -184,6 +236,7 @@ fn setup_cottage(
         next_task_id: 1,
         ..default()
     });
+    commands.insert_resource(SemanticEventFeed::default());
     commands.insert_resource(UiAudioVariation(client_audio_seed()));
     commands.spawn((Camera2d, CottageCameraEntity));
     commands.spawn((
@@ -393,6 +446,40 @@ fn spawn_status_card(
                 TextColor(Color::srgb(0.78, 0.9, 1.0)),
                 OrderFeedbackText,
             ));
+            // It starts hidden and becomes available only while the selected
+            // resident has an authoritative queued or active player task.
+            card.spawn((
+                Button,
+                Node {
+                    width: Val::Percent(100.0),
+                    height: Val::Px(38.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                ImageNode::new(button.clone()),
+                Visibility::Hidden,
+                CancelPlayerTaskButton,
+            ))
+            .with_child((
+                Text::new("Cancel task"),
+                TextFont {
+                    font: font.clone(),
+                    font_size: 18.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.04, 0.08, 0.12)),
+            ));
+            card.spawn((
+                Text::new(""),
+                TextFont {
+                    font: font.clone(),
+                    font_size: 15.0,
+                    ..default()
+                },
+                TextColor(Color::srgb(0.78, 0.9, 1.0)),
+                SemanticEventFeedText,
+            ));
             card.spawn((
                 Button,
                 Node {
@@ -478,7 +565,49 @@ fn submit_selected_toilet_order(
             affordance: DefinitionId::new("affordance.use_toilet"),
             priority: 100,
         });
-    order.pending = Some(PendingOrder { task });
+    order.pending = Some(PendingOrder {
+        task,
+        action: PendingAction::Order,
+        receipt_start: driver.simulation.event_ledger().len(),
+    });
+    order.receipt = None;
+    play_ui_click(&mut commands, &asset_server, &mut audio_variation);
+}
+
+/// Cancels only work that the immutable snapshot identifies as queued or
+/// active for the selected resident.
+fn submit_selected_task_cancellation(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut buttons: Query<&Interaction, (With<CancelPlayerTaskButton>, Changed<Interaction>)>,
+    selected: Res<SelectedResident>,
+    mut driver: ResMut<SimulationDriver>,
+    mut order: ResMut<OrderState>,
+    mut audio_variation: ResMut<UiAudioVariation>,
+) {
+    if !buttons
+        .iter_mut()
+        .any(|interaction| *interaction == Interaction::Pressed)
+    {
+        return;
+    }
+    let Some(task) = selected_task_to_cancel(selected.0, &driver.current) else {
+        return;
+    };
+    let outcome = selected_cancellation_outcome(selected.0, &driver.current)
+        .expect("the selected cancellable task has an authoritative state");
+    if order.pending.is_some() {
+        return;
+    }
+    driver
+        .simulation
+        .submit_player_command(PlayerCommand::CancelPlayerTask { task });
+    order.pending = Some(PendingOrder {
+        task,
+        action: PendingAction::Cancellation(outcome),
+        receipt_start: driver.simulation.event_ledger().len(),
+    });
+    order.cancellation_outcomes.insert(task, outcome);
     order.receipt = None;
     play_ui_click(&mut commands, &asset_server, &mut audio_variation);
 }
@@ -489,6 +618,37 @@ fn selected_resident_has_player_task(resident: SimId, snapshot: &CottageSnapshot
         .iter()
         .find(|candidate| candidate.id == resident)
         .is_some_and(|candidate| candidate.player_task.is_some())
+}
+
+fn selected_task_to_cancel(
+    selected: Option<SimId>,
+    snapshot: &CottageSnapshot,
+) -> Option<PlayerTaskId> {
+    selected.and_then(|id| {
+        snapshot
+            .residents
+            .iter()
+            .find(|resident| resident.id == id)
+            .and_then(|resident| resident.player_task)
+            .map(|task| task.id)
+    })
+}
+
+fn selected_cancellation_outcome(
+    selected: Option<SimId>,
+    snapshot: &CottageSnapshot,
+) -> Option<CancellationOutcome> {
+    selected.and_then(|id| {
+        snapshot
+            .residents
+            .iter()
+            .find(|resident| resident.id == id)
+            .and_then(|resident| resident.player_task)
+            .map(|task| match task.state {
+                ClientPlayerTaskState::Queued => CancellationOutcome::Queued,
+                ClientPlayerTaskState::Active => CancellationOutcome::Active,
+            })
+    })
 }
 
 /// Consumes an immutable receipt exactly once from the simulation's published
@@ -503,28 +663,43 @@ fn consume_order_receipt(order: &mut OrderState, events: &[WorldEvent]) {
     let Some(pending) = order.pending else {
         return;
     };
-    let Some(receipt) = deferred_receipt(pending.task, events) else {
+    let Some(receipt) = deferred_receipt(pending, events) else {
         return;
     };
     order.pending = None;
     order.receipt = Some(receipt);
 }
 
-fn deferred_receipt(task: PlayerTaskId, events: &[WorldEvent]) -> Option<String> {
-    events.iter().find_map(|event| match &event.kind {
-        WorldEventKind::PlayerCommandAccepted { task: received } if *received == task => {
-            Some(format!("Order #{task_id} accepted.", task_id = task.0))
-        }
-        WorldEventKind::PlayerCommandRejected {
-            task: received,
-            reason,
-        } if *received == task => Some(format!(
-            "Order #{task_id} rejected: {reason}.",
-            task_id = task.0,
-            reason = rejection_label(*reason)
-        )),
-        _ => None,
-    })
+fn deferred_receipt(pending: PendingOrder, events: &[WorldEvent]) -> Option<String> {
+    events
+        .iter()
+        .skip(pending.receipt_start)
+        .find_map(|event| match &event.kind {
+            WorldEventKind::PlayerCommandAccepted { task } if *task == pending.task => {
+                Some(format!(
+                    "{} #{} accepted.",
+                    pending_action_label(pending.action),
+                    pending.task.0
+                ))
+            }
+            WorldEventKind::PlayerCommandRejected {
+                task: received,
+                reason,
+            } if *received == pending.task => Some(format!(
+                "{} #{} rejected: {reason}.",
+                pending_action_label(pending.action),
+                pending.task.0,
+                reason = rejection_label(*reason)
+            )),
+            _ => None,
+        })
+}
+
+fn pending_action_label(action: PendingAction) -> &'static str {
+    match action {
+        PendingAction::Order => "Order",
+        PendingAction::Cancellation(_) => "Cancellation",
+    }
 }
 
 fn rejection_label(reason: PlayerCommandRejection) -> &'static str {
@@ -552,6 +727,135 @@ fn update_order_feedback_text(
         || order.receipt.clone().unwrap_or_default(),
         |pending| format!("Order #{} pending…", pending.task.0),
     );
+}
+
+fn update_cancel_button(
+    selected: Res<SelectedResident>,
+    driver: Res<SimulationDriver>,
+    order: Res<OrderState>,
+    mut buttons: Query<&mut Visibility, With<CancelPlayerTaskButton>>,
+) {
+    if !selected.is_changed() && !driver.is_changed() && !order.is_changed() {
+        return;
+    }
+    let enabled =
+        order.pending.is_none() && selected_task_to_cancel(selected.0, &driver.current).is_some();
+    for mut visibility in &mut buttons {
+        *visibility = if enabled {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+/// `update_order_feedback_text` owns the established order copy. Override
+/// only the in-flight cancellation wording so the same task ID is not
+/// misleadingly presented as a second order.
+fn correct_pending_action_feedback_text(
+    order: Res<OrderState>,
+    mut text: Query<&mut Text, With<OrderFeedbackText>>,
+) {
+    let Some(PendingOrder {
+        task,
+        action: PendingAction::Cancellation(outcome),
+        ..
+    }) = order.pending
+    else {
+        return;
+    };
+    let Ok(mut text) = text.single_mut() else {
+        return;
+    };
+    text.0 = match outcome {
+        CancellationOutcome::Queued => format!("Removing queued order #{}...", task.0),
+        CancellationOutcome::Active => format!("Cancelling active order #{}...", task.0),
+    };
+}
+
+fn update_semantic_event_feed(
+    mut feed: ResMut<SemanticEventFeed>,
+    mut order: ResMut<OrderState>,
+    driver: Res<SimulationDriver>,
+) {
+    consume_semantic_events(
+        &mut feed,
+        driver.simulation.event_ledger(),
+        &driver.current,
+        &mut order.cancellation_outcomes,
+    );
+}
+
+fn consume_semantic_events(
+    feed: &mut SemanticEventFeed,
+    events: &[WorldEvent],
+    snapshot: &CottageSnapshot,
+    cancellation_outcomes: &mut BTreeMap<PlayerTaskId, CancellationOutcome>,
+) {
+    for event in events.iter().skip(feed.consumed_events) {
+        if let Some(entry) = semantic_event_label(&event.kind, snapshot, cancellation_outcomes) {
+            feed.entries.push(entry);
+        }
+    }
+    feed.consumed_events = events.len();
+    const VISIBLE_EVENTS: usize = 4;
+    if feed.entries.len() > VISIBLE_EVENTS {
+        feed.entries.drain(..feed.entries.len() - VISIBLE_EVENTS);
+    }
+}
+
+fn semantic_event_label(
+    kind: &WorldEventKind,
+    snapshot: &CottageSnapshot,
+    cancellation_outcomes: &mut BTreeMap<PlayerTaskId, CancellationOutcome>,
+) -> Option<String> {
+    let resident_name = |id: SimId| {
+        snapshot
+            .residents
+            .iter()
+            .find(|resident| resident.id == id)
+            .map_or("A newcomer", |resident| resident.display_name.as_str())
+    };
+    match kind {
+        WorldEventKind::ObjectUseWaited { resident, .. } => Some(format!(
+            "{} is waiting for the toilet.",
+            resident_name(*resident)
+        )),
+        WorldEventKind::ObjectUseStarted { resident, .. } => Some(format!(
+            "{} started using the toilet.",
+            resident_name(*resident)
+        )),
+        WorldEventKind::ObjectUseCompleted { resident, .. } => Some(format!(
+            "{} finished using the toilet.",
+            resident_name(*resident)
+        )),
+        WorldEventKind::TaskCancelled { task, resident, .. } => {
+            let outcome = cancellation_outcomes.remove(task)?;
+            let outcome_label = match outcome {
+                CancellationOutcome::Queued => "removed from queue",
+                CancellationOutcome::Active => "toilet released",
+            };
+            Some(format!(
+                "Order #{} for {} cancelled; {outcome_label}.",
+                task.0,
+                resident_name(*resident)
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn update_semantic_event_feed_text(
+    feed: Res<SemanticEventFeed>,
+    mut text: Query<&mut Text, With<SemanticEventFeedText>>,
+) {
+    if !feed.is_changed() {
+        return;
+    }
+    let Ok(mut text) = text.single_mut() else {
+        return;
+    };
+    text.0 = feed.entries.join("\n");
 }
 
 fn client_audio_seed() -> u64 {
@@ -1108,6 +1412,8 @@ fn workspace_root() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use village_sim::{
         ClientIntention, ClientPlayerTaskSnapshot, ClientPlayerTaskState, ClientResidentSnapshot,
         DefinitionId, PlayerCommand, PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId,
@@ -1115,11 +1421,12 @@ mod tests {
     };
 
     use super::{
-        CottageCamera, FloorVisual, OrderState, PendingOrder, ResidentVisual, SelectedResident,
-        SelectedResidentMarker, UiAudioVariation, apply_floor_focus, bounded_zoom,
-        consume_order_receipt, content_root, deferred_receipt, floor_offset, followed_floor,
-        next_ui_pitch, resident_status_text, rotate_hue, selected_status_text, tile_to_world,
-        update_selected_resident_marker,
+        CancellationOutcome, CottageCamera, FloorVisual, OrderState, PendingAction, PendingOrder,
+        ResidentVisual, SelectedResident, SelectedResidentMarker, SemanticEventFeed,
+        UiAudioVariation, apply_floor_focus, bounded_zoom, consume_order_receipt,
+        consume_semantic_events, content_root, deferred_receipt, floor_offset, followed_floor,
+        next_ui_pitch, resident_status_text, rotate_hue, selected_status_text,
+        selected_task_to_cancel, tile_to_world, update_selected_resident_marker,
     };
     use bevy::prelude::{App, GlobalTransform, Transform, Update, Visibility};
 
@@ -1330,9 +1637,170 @@ mod tests {
         ];
 
         assert_eq!(
-            deferred_receipt(task, &events),
+            deferred_receipt(
+                PendingOrder {
+                    task,
+                    action: PendingAction::Order,
+                    receipt_start: 0,
+                },
+                &events
+            ),
             Some("Order #12 accepted.".to_owned())
         );
+    }
+
+    #[test]
+    fn cancellation_receipt_is_named_as_a_cancellation() {
+        let task = PlayerTaskId(27);
+        let events = [WorldEvent {
+            tick: 8,
+            kind: WorldEventKind::PlayerCommandAccepted { task },
+        }];
+
+        assert_eq!(
+            deferred_receipt(
+                PendingOrder {
+                    task,
+                    action: PendingAction::Cancellation(CancellationOutcome::Queued),
+                    receipt_start: 0,
+                },
+                &events,
+            ),
+            Some("Cancellation #27 accepted.".to_owned())
+        );
+    }
+
+    #[test]
+    fn cancellation_receipt_ignores_the_orders_earlier_receipt() {
+        let task = PlayerTaskId(271);
+        let events = [
+            WorldEvent {
+                tick: 8,
+                kind: WorldEventKind::PlayerCommandAccepted { task },
+            },
+            WorldEvent {
+                tick: 9,
+                kind: WorldEventKind::PlayerCommandAccepted { task },
+            },
+        ];
+
+        assert_eq!(
+            deferred_receipt(
+                PendingOrder {
+                    task,
+                    action: PendingAction::Cancellation(CancellationOutcome::Active),
+                    receipt_start: 1,
+                },
+                &events,
+            ),
+            Some("Cancellation #271 accepted.".to_owned())
+        );
+    }
+
+    #[test]
+    fn semantic_event_feed_consumes_wait_and_active_cancellation_once() {
+        let task = PlayerTaskId(28);
+        let snapshot = village_sim::CottageSnapshot {
+            tick: 8,
+            floors: Vec::new(),
+            objects: Vec::new(),
+            residents: Vec::new(),
+        };
+        let events = [
+            WorldEvent {
+                tick: 8,
+                kind: WorldEventKind::ObjectUseWaited {
+                    resident: SimId(1),
+                    object: DefinitionId::new("object.cottage_toilet"),
+                    affordance: DefinitionId::new("affordance.use_toilet"),
+                    blocked_by: SimId(2),
+                },
+            },
+            WorldEvent {
+                tick: 8,
+                kind: WorldEventKind::TaskCancelled {
+                    task,
+                    resident: SimId(2),
+                    object: DefinitionId::new("object.cottage_toilet"),
+                    affordance: DefinitionId::new("affordance.use_toilet"),
+                },
+            },
+        ];
+        let mut feed = SemanticEventFeed::default();
+        let mut outcomes = BTreeMap::from([(task, CancellationOutcome::Active)]);
+
+        consume_semantic_events(&mut feed, &events, &snapshot, &mut outcomes);
+        consume_semantic_events(&mut feed, &events, &snapshot, &mut outcomes);
+
+        assert_eq!(feed.entries.len(), 2);
+        assert_eq!(feed.entries[0], "A newcomer is waiting for the toilet.");
+        assert_eq!(
+            feed.entries[1],
+            "Order #28 for A newcomer cancelled; toilet released."
+        );
+        assert!(outcomes.is_empty());
+    }
+
+    #[test]
+    fn semantic_event_feed_labels_a_queued_cancellation_as_removed_from_queue() {
+        let task = PlayerTaskId(30);
+        let snapshot = village_sim::CottageSnapshot {
+            tick: 8,
+            floors: Vec::new(),
+            objects: Vec::new(),
+            residents: Vec::new(),
+        };
+        let events = [WorldEvent {
+            tick: 8,
+            kind: WorldEventKind::TaskCancelled {
+                task,
+                resident: SimId(2),
+                object: DefinitionId::new("object.cottage_toilet"),
+                affordance: DefinitionId::new("affordance.use_toilet"),
+            },
+        }];
+        let mut feed = SemanticEventFeed::default();
+        let mut outcomes = BTreeMap::from([(task, CancellationOutcome::Queued)]);
+
+        consume_semantic_events(&mut feed, &events, &snapshot, &mut outcomes);
+
+        assert_eq!(
+            feed.entries,
+            ["Order #30 for A newcomer cancelled; removed from queue."],
+        );
+        assert!(outcomes.is_empty());
+    }
+
+    #[test]
+    fn only_an_authoritative_player_task_can_be_cancelled() {
+        let snapshot = village_sim::CottageSnapshot {
+            tick: 0,
+            floors: Vec::new(),
+            objects: Vec::new(),
+            residents: vec![ClientResidentSnapshot {
+                id: SimId(3),
+                definition_id: DefinitionId::new("person.newcomer_a"),
+                display_name: "Rowan Bell".to_owned(),
+                position: TilePosition {
+                    floor: 0,
+                    x: 0,
+                    y: 0,
+                },
+                toilet_need: Some(50),
+                autonomous_intention: None,
+                player_task: Some(ClientPlayerTaskSnapshot {
+                    id: PlayerTaskId(29),
+                    state: ClientPlayerTaskState::Active,
+                }),
+            }],
+        };
+
+        assert_eq!(
+            selected_task_to_cancel(Some(SimId(3)), &snapshot),
+            Some(PlayerTaskId(29))
+        );
+        assert_eq!(selected_task_to_cancel(Some(SimId(4)), &snapshot), None);
+        assert_eq!(selected_task_to_cancel(None, &snapshot), None);
     }
 
     #[test]
@@ -1347,7 +1815,14 @@ mod tests {
         }];
 
         assert_eq!(
-            deferred_receipt(task, &events),
+            deferred_receipt(
+                PendingOrder {
+                    task,
+                    action: PendingAction::Order,
+                    receipt_start: 0,
+                },
+                &events
+            ),
             Some("Order #19 rejected: resident busy.".to_owned())
         );
     }
@@ -1360,8 +1835,13 @@ mod tests {
         let task = PlayerTaskId(44);
         let mut order = OrderState {
             next_task_id: 45,
-            pending: Some(PendingOrder { task }),
+            pending: Some(PendingOrder {
+                task,
+                action: PendingAction::Order,
+                receipt_start: 0,
+            }),
             receipt: None,
+            ..OrderState::default()
         };
 
         simulation.submit_player_command(PlayerCommand::QueueUseToilet {

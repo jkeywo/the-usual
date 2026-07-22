@@ -192,6 +192,14 @@ entities:
       summary: The Cottage client owns stable task-ID allocation, pending presentation, and one-time display of immutable deferred command receipts; it submits typed orders but never changes simulation state directly. UI click/tap choice and bounded 0.94x to 1.06x pitch variation use client-local entropy and are never derived from or fed into the simulation seed or ledger.
       references: [village-client, player-command-boundary, cottage-player-order-cancellation]
 
+  - decision: cottage-client-cancellation-event-feed
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Client Cancellation Feedback Uses the Immutable Ledger
+      summary: The Cottage client enables cancellation only for the selected resident's snapshot-projected queued or active task. It submits CancelPlayerTask without local simulation mutation, displays the deferred cancellation receipt, and advances a client-only cursor through the append-only event ledger so waiting, use, completion, and released-on-cancellation feedback appears once.
+      references: [village-client, player-command-boundary, cottage-player-order-cancellation]
+
   - decision: modular-shared-content-assets
     core:
       status: accepted
