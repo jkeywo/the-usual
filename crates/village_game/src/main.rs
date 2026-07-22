@@ -238,7 +238,23 @@ fn setup_cottage(
     });
     commands.insert_resource(SemanticEventFeed::default());
     commands.insert_resource(UiAudioVariation(client_audio_seed()));
-    commands.spawn((Camera2d, CottageCameraEntity));
+    // The authored cottage occupies positive tile coordinates. Centre the
+    // initial ground-floor view on its bounds rather than the empty world
+    // origin, which otherwise exposes only Bevy's clear colour.
+    let ground_floor = snapshot
+        .floors
+        .iter()
+        .find(|floor| floor.floor == 0)
+        .expect("Cottage fixture has a ground floor");
+    commands.spawn((
+        Camera2d,
+        Transform::from_xyz(
+            ground_floor.width as f32 * TILE_PIXELS / 2.0,
+            ground_floor.height as f32 * TILE_PIXELS / 2.0,
+            0.0,
+        ),
+        CottageCameraEntity,
+    ));
     commands.spawn((
         Sprite::from_color(
             Color::srgba(0.95, 0.8, 0.2, 0.45),
@@ -1377,6 +1393,15 @@ fn spawn_floor(
     else {
         return;
     };
+    let size = Vec2::new(
+        definition.width as f32 * TILE_PIXELS,
+        definition.height as f32 * TILE_PIXELS,
+    );
+    commands.spawn((
+        Sprite::from_color(Color::srgb(0.18, 0.22, 0.26), size),
+        Transform::from_xyz(offset.x + size.x / 2.0, offset.y + size.y / 2.0, -1.0),
+        FloorVisual(floor),
+    ));
     for y in 0..definition.height {
         for x in 0..definition.width {
             let position = tile_to_world(x, y) + offset;
