@@ -20,7 +20,7 @@ entities:
       status: proposed
       confidence: confirmed
       title: Pub Travel and Service Contention
-      summary: The King's Head exists as a navigable region of the ground floor with an authored bar smart object exposing a single service slot, and a household agent can travel there from the cottage. Contending for the occupied bar slot without advance reservation — waiting, joining a social queue, choosing an alternative, or replanning — is the next step and reuses the existing claim arbitration.
+      summary: The King's Head is a navigable region of the ground floor with an authored bar smart object exposing a single service slot. Household agents travel there from the cottage and contend for the occupied bar slot without advance reservation through the existing deterministic claim arbitration — one is served while the other waits, then proceeds on release. Richer responses such as joining a visible social queue or choosing an alternative fixture remain later work.
       references: [tile-navigation, smart-objects, capability-arbitration]
 
   - component: initial-social-consequences

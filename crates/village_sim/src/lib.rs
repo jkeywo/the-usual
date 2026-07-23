@@ -2506,6 +2506,79 @@ mod tests {
     }
 
     #[test]
+    fn two_residents_travel_to_the_pub_and_contend_for_the_single_bar_slot() {
+        let mut simulation = load_simulation();
+        let bar = DefinitionId::new("object.kings_head_bar");
+        let serve = DefinitionId::new("slot.serve");
+        let order = DefinitionId::new("affordance.order_drink");
+        let first = SimId(1);
+        let second = SimId(2);
+        let near_first = TilePosition {
+            floor: 0,
+            x: 25,
+            y: 18,
+        };
+        let near_second = TilePosition {
+            floor: 0,
+            x: 26,
+            y: 17,
+        };
+        // Keep the walk free of an autonomous toilet diversion so the test
+        // isolates pub travel and service contention.
+        assert!(simulation.set_toilet_need(first, 0));
+
+        assert!(simulation.begin_go_to(first, near_first));
+        assert!(simulation.begin_go_to(second, near_second));
+        for _ in 0..80 {
+            simulation.advance_tick();
+            if simulation.resident_position(first) == Some(near_first)
+                && simulation.resident_position(second) == Some(near_second)
+            {
+                break;
+            }
+        }
+        assert_eq!(simulation.resident_position(first), Some(near_first));
+        assert_eq!(simulation.resident_position(second), Some(near_second));
+
+        // Both order at the one-slot bar; no slot is claimed before execution.
+        assert!(simulation.set_toilet_need(first, 0));
+        assert!(simulation.begin_use_object(first, &bar, &order, 1));
+        assert!(simulation.begin_use_object(second, &bar, &order, 0));
+        assert_eq!(simulation.object_slot_claimant(&bar, &serve), None);
+
+        // Higher priority is served first; the other waits without reservation.
+        simulation.advance_tick();
+        assert_eq!(simulation.object_slot_claimant(&bar, &serve), Some(first));
+        simulation.advance_tick();
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::ObjectUseWaited {
+                    resident: second,
+                    object: bar.clone(),
+                    affordance: order.clone(),
+                    blocked_by: first,
+                }
+        }));
+
+        // After the first is served and releases, the waiting order proceeds.
+        for _ in 0..6 {
+            simulation.advance_tick();
+        }
+        assert_eq!(simulation.object_slot_claimant(&bar, &serve), None);
+        let started = simulation
+            .event_ledger()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    WorldEventKind::ObjectUseStarted { object, .. } if *object == bar
+                )
+            })
+            .count();
+        assert_eq!(started, 2, "both residents are eventually served");
+    }
+
+    #[test]
     fn go_to_uses_the_paired_stair_portal_and_emits_arrival() {
         let mut simulation = load_simulation();
         let resident = SimId(1);
