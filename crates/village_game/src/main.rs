@@ -3,7 +3,13 @@
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
-use bevy::{asset::AssetPlugin, input::mouse::MouseWheel};
+use bevy::{
+    asset::AssetPlugin,
+    input::{
+        mouse::MouseWheel,
+        touch::{Touch, Touches},
+    },
+};
 use village_sim::{
     ClientIntention, ClientPerception, ClientPlayerTaskState, CottageSnapshot, DefinitionId,
     PlayerCommand, PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId, Simulation,
@@ -42,8 +48,32 @@ struct CottageCamera {
     zoom: u8,
 }
 
+/// Pointer travel (in window pixels) beyond which a right-press or a touch is
+/// treated as a drag rather than a click or tap.
+const DRAG_SLOP: f32 = 6.0;
+
+/// The maximum gap between two taps, in seconds, for a double-tap.
+const DOUBLE_TAP_SECS: f32 = 0.35;
+
 #[derive(Default, Resource)]
-struct PanDrag(Option<Vec2>);
+struct PanDrag {
+    /// Last cursor position while the right button is held, for pan deltas.
+    last: Option<Vec2>,
+    /// Cursor position where the current right press began; fixed for the
+    /// gesture so a pan can be told apart from a click.
+    press_origin: Option<Vec2>,
+    /// Whether the current right press has travelled far enough to be a pan.
+    panned: bool,
+}
+
+/// Transient touch-gesture state: one-finger pan, two-finger pinch, and the
+/// last tap for double-tap detection.
+#[derive(Default, Resource)]
+struct TouchInput {
+    pan_last: Option<Vec2>,
+    pinch_prev: Option<f32>,
+    last_tap: Option<(f32, Vec2)>,
+}
 
 impl Default for CottageCamera {
     fn default() -> Self {
@@ -221,6 +251,7 @@ fn main() {
                     select_resident_from_sprite,
                     select_resident_from_card,
                     queue_selected_go_to,
+                    touch_select_and_move,
                     submit_selected_toilet_order,
                     submit_selected_task_cancellation,
                 )
@@ -229,6 +260,7 @@ fn main() {
                     update_camera_controls,
                     update_camera_control_labels,
                     pan_and_zoom_camera,
+                    touch_pan_and_zoom,
                     follow_selected_resident,
                     update_resident_floor_layers,
                     update_selected_resident_marker,
@@ -271,6 +303,7 @@ fn setup_cottage(
     commands.insert_resource(SelectedResident::default());
     commands.insert_resource(CottageCamera::default());
     commands.insert_resource(PanDrag::default());
+    commands.insert_resource(TouchInput::default());
     commands.insert_resource(OrderState {
         next_task_id: 1,
         ..default()
@@ -1108,10 +1141,12 @@ fn pan_and_zoom_camera(
 
     let cursor = window.cursor_position();
     if mouse.just_pressed(MouseButton::Right) {
-        drag.0 = cursor;
+        drag.last = cursor;
+        drag.press_origin = cursor;
+        drag.panned = false;
     }
     if mouse.pressed(MouseButton::Right)
-        && let (Some(previous), Some(current)) = (drag.0, cursor)
+        && let (Some(previous), Some(current)) = (drag.last, cursor)
     {
         let delta = current - previous;
         // Projection scale maps viewport pixels into world pixels here.
@@ -1119,11 +1154,18 @@ fn pan_and_zoom_camera(
             (transform.translation.x - delta.x / f32::from(controls.zoom)).round();
         transform.translation.y =
             (transform.translation.y + delta.y / f32::from(controls.zoom)).round();
-        drag.0 = Some(current);
-        controls.follow_selected = false;
+        drag.last = Some(current);
+        // Compare against the fixed press origin, not the last frame, so any
+        // real drag latches `panned` and suppresses the click-to-move.
+        if let Some(origin) = drag.press_origin
+            && origin.distance(current) > DRAG_SLOP
+        {
+            drag.panned = true;
+            controls.follow_selected = false;
+        }
     }
     if mouse.just_released(MouseButton::Right) {
-        drag.0 = None;
+        drag.last = None;
     }
 }
 
@@ -1231,24 +1273,14 @@ fn select_resident_from_sprite(
     let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
         return;
     };
-    let selected_id = residents
-        .iter()
-        .filter_map(|(resident, transform, visibility)| {
-            if *visibility != Visibility::Visible {
-                return None;
-            }
-            let distance = transform.translation().truncate().distance(world);
-            (distance <= TILE_PIXELS * 0.65).then_some((resident.id, distance))
-        })
-        .min_by(|left, right| left.1.total_cmp(&right.1))
-        .map(|(id, _)| id);
-    if selected_id.is_some() {
-        selected.0 = selected_id;
+    if let Some(id) = nearest_resident(world, &residents) {
+        selected.0 = Some(id);
     }
 }
 
-/// A short right click on visible ground creates an ordinary typed movement
-/// task for the selected newcomer. Right-drag remains camera panning.
+/// Right click-to-move fires on button release and is cancelled if the press
+/// became a drag (a pan). Reading `panned` rather than comparing to the last
+/// drag frame is what keeps panning from also issuing a move.
 #[allow(clippy::too_many_arguments)] // Input, camera, simulation, and UI state stay separate resources.
 fn queue_selected_go_to(
     mouse: Res<ButtonInput<MouseButton>>,
@@ -1260,10 +1292,10 @@ fn queue_selected_go_to(
     mut driver: ResMut<SimulationDriver>,
     mut order: ResMut<OrderState>,
 ) {
-    if !mouse.just_released(MouseButton::Right) || order.pending.is_some() {
+    if !mouse.just_released(MouseButton::Right) || drag.panned || order.pending.is_some() {
         return;
     }
-    let (Some(resident), Some(start)) = (selected.0, drag.0) else {
+    let Some(resident) = selected.0 else {
         return;
     };
     let Ok(window) = windows.single() else {
@@ -1272,21 +1304,37 @@ fn queue_selected_go_to(
     let Some(cursor) = window.cursor_position() else {
         return;
     };
-    if cursor.distance(start) > 4.0 {
-        return;
-    }
     let Ok((camera, camera_transform)) = camera.single() else {
         return;
     };
     let Ok(world) = camera.viewport_to_world_2d(camera_transform, cursor) else {
         return;
     };
-    let local = world - floor_offset(controls.focused_floor);
-    let destination = TilePosition {
-        floor: controls.focused_floor,
+    submit_go_to(
+        &mut driver,
+        &mut order,
+        resident,
+        ground_tile(world, controls.focused_floor),
+    );
+}
+
+/// Projects a world position onto a tile of the focused floor.
+fn ground_tile(world: Vec2, focused_floor: u8) -> TilePosition {
+    let local = world - floor_offset(focused_floor);
+    TilePosition {
+        floor: focused_floor,
         x: (local.x / TILE_PIXELS).floor() as i32,
         y: (local.y / TILE_PIXELS).floor() as i32,
-    };
+    }
+}
+
+/// Submits a typed ground-move order and records it as the pending order.
+fn submit_go_to(
+    driver: &mut SimulationDriver,
+    order: &mut OrderState,
+    resident: SimId,
+    destination: TilePosition,
+) {
     let task = PlayerTaskId(order.next_task_id);
     order.next_task_id += 1;
     driver
@@ -1303,6 +1351,126 @@ fn queue_selected_go_to(
         receipt_start: driver.simulation.event_ledger().len(),
     });
     order.receipt = None;
+}
+
+/// The nearest visible resident sprite to a world position, within a tap
+/// radius. Shared by mouse selection and touch selection.
+fn nearest_resident(
+    world: Vec2,
+    residents: &Query<(&ResidentVisual, &GlobalTransform, &Visibility)>,
+) -> Option<SimId> {
+    residents
+        .iter()
+        .filter_map(|(resident, transform, visibility)| {
+            if *visibility != Visibility::Visible {
+                return None;
+            }
+            let distance = transform.translation().truncate().distance(world);
+            (distance <= TILE_PIXELS * 0.65).then_some((resident.id, distance))
+        })
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(id, _)| id)
+}
+
+/// One-finger drag pans the view; two-finger pinch steps the integer zoom.
+fn touch_pan_and_zoom(
+    touches: Res<Touches>,
+    mut state: ResMut<TouchInput>,
+    mut controls: ResMut<CottageCamera>,
+    mut camera: Query<&mut Transform, With<CottageCameraEntity>>,
+) {
+    let points = touches.iter().map(Touch::position).collect::<Vec<_>>();
+    match points.len() {
+        1 => {
+            state.pinch_prev = None;
+            let position = points[0];
+            if let Some(previous) = state.pan_last
+                && let Ok(mut transform) = camera.single_mut()
+            {
+                let delta = position - previous;
+                let zoom = f32::from(controls.zoom);
+                transform.translation.x = (transform.translation.x - delta.x / zoom).round();
+                transform.translation.y = (transform.translation.y + delta.y / zoom).round();
+                controls.follow_selected = false;
+            }
+            state.pan_last = Some(position);
+        }
+        2 => {
+            state.pan_last = None;
+            let distance = points[0].distance(points[1]);
+            match state.pinch_prev {
+                None => state.pinch_prev = Some(distance),
+                Some(previous) if previous > 0.0 => {
+                    let ratio = distance / previous;
+                    if ratio > 1.2 {
+                        controls.zoom = bounded_zoom(controls.zoom, 1.0);
+                        controls.follow_selected = false;
+                        state.pinch_prev = Some(distance);
+                    } else if ratio < 1.0 / 1.2 {
+                        controls.zoom = bounded_zoom(controls.zoom, -1.0);
+                        controls.follow_selected = false;
+                        state.pinch_prev = Some(distance);
+                    }
+                }
+                Some(_) => state.pinch_prev = Some(distance),
+            }
+        }
+        _ => {
+            state.pan_last = None;
+            state.pinch_prev = None;
+        }
+    }
+}
+
+/// A single tap selects a newcomer; a double tap on the ground moves the
+/// selected newcomer. Drags (pans) are ignored here.
+#[allow(clippy::too_many_arguments)] // Input, camera, simulation, and UI state stay separate resources.
+fn touch_select_and_move(
+    touches: Res<Touches>,
+    time: Res<Time>,
+    camera: Query<(&Camera, &GlobalTransform), With<CottageCameraEntity>>,
+    residents: Query<(&ResidentVisual, &GlobalTransform, &Visibility)>,
+    controls: Res<CottageCamera>,
+    mut selected: ResMut<SelectedResident>,
+    mut driver: ResMut<SimulationDriver>,
+    mut order: ResMut<OrderState>,
+    mut state: ResMut<TouchInput>,
+) {
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
+    for touch in touches.iter_just_released() {
+        // A finger that travelled was a pan, not a tap.
+        if touch.start_position().distance(touch.position()) > DRAG_SLOP {
+            continue;
+        }
+        let position = touch.position();
+        let Ok(world) = camera.viewport_to_world_2d(camera_transform, position) else {
+            continue;
+        };
+        let now = time.elapsed_secs();
+        if let Some((last_time, last_position)) = state.last_tap
+            && now - last_time < DOUBLE_TAP_SECS
+            && position.distance(last_position) < TILE_PIXELS
+        {
+            state.last_tap = None;
+            if order.pending.is_none()
+                && let Some(resident) = selected.0
+            {
+                submit_go_to(
+                    &mut driver,
+                    &mut order,
+                    resident,
+                    ground_tile(world, controls.focused_floor),
+                );
+            }
+            continue;
+        }
+        if let Some(id) = nearest_resident(world, &residents) {
+            selected.0 = Some(id);
+        }
+        state.last_tap = Some((now, position));
+    }
 }
 
 #[allow(clippy::type_complexity)] // The ParamSet guarantees the marker write is disjoint.
