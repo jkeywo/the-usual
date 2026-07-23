@@ -198,6 +198,15 @@ fn main() {
                 .set(AssetPlugin {
                     file_path: asset_root(),
                     ..default()
+                })
+                // On the web, size Bevy's canvas to its parent (the page body)
+                // instead of the winit default 300x150. No-op on desktop.
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        fit_canvas_to_parent: true,
+                        ..default()
+                    }),
+                    ..default()
                 }),
         )
         .add_systems(Startup, setup_cottage)
