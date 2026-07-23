@@ -7,7 +7,7 @@ use bevy::{asset::AssetPlugin, input::mouse::MouseWheel};
 use village_sim::{
     ClientIntention, ClientPlayerTaskState, CottageSnapshot, DefinitionId, PlayerCommand,
     PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId, Simulation, TilePosition,
-    WorldEvent, WorldEventKind,
+    TimeOfDay, WorldEvent, WorldEventKind,
 };
 
 /// The authored cottage remains a 32px grid. Residents and furniture use a
@@ -70,6 +70,10 @@ struct ResidentSelector(SimId);
 
 #[derive(Component)]
 struct StatusCardText;
+
+/// The in-world day clock shown as a small always-on HUD readout.
+#[derive(Component)]
+struct ClockText;
 
 #[derive(Component)]
 struct OrderFeedbackText;
@@ -226,6 +230,7 @@ fn main() {
                 )
                     .chain(),
                 (
+                    update_clock_text,
                     update_status_card,
                     update_order_feedback,
                     update_order_feedback_text,
@@ -410,6 +415,33 @@ fn setup_cottage(
     }
 
     spawn_status_card(&mut commands, &asset_server, &snapshot);
+
+    let font = asset_server.load("client/ui/kenney_future_narrow.ttf");
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(16.0),
+                top: Val::Px(16.0),
+                padding: UiRect::all(Val::Px(8.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.06, 0.09, 0.16, 0.85)),
+        ))
+        .with_child((
+            Text::new(format_clock(snapshot.time_of_day)),
+            TextFont {
+                font,
+                font_size: 24.0,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+            ClockText,
+        ));
+}
+
+fn format_clock(time: TimeOfDay) -> String {
+    format!("{:02}:{:02}", time.hour, time.minute)
 }
 
 fn spawn_status_card(
@@ -1281,6 +1313,16 @@ fn update_selected_resident_marker(
     };
 }
 
+fn update_clock_text(driver: Res<SimulationDriver>, mut text: Query<&mut Text, With<ClockText>>) {
+    if !driver.is_changed() {
+        return;
+    }
+    let Ok(mut text) = text.single_mut() else {
+        return;
+    };
+    text.0 = format_clock(driver.current.time_of_day);
+}
+
 fn update_status_card(
     selected: Res<SelectedResident>,
     driver: Res<SimulationDriver>,
@@ -1562,7 +1604,7 @@ mod tests {
     use village_sim::{
         ClientIntention, ClientPlayerTaskSnapshot, ClientPlayerTaskState, ClientResidentSnapshot,
         DefinitionId, PlayerCommand, PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId,
-        Simulation, TilePosition, WorldEvent, WorldEventKind,
+        Simulation, TilePosition, TimeOfDay, WorldEvent, WorldEventKind,
     };
 
     use super::{
@@ -1570,10 +1612,22 @@ mod tests {
         PendingOrder, ResidentVisual, SelectedResident, SelectedResidentMarker, SemanticEventFeed,
         UiAudioVariation, apply_floor_focus, bounded_zoom, cancellable_tasks,
         consume_order_receipt, consume_semantic_events, content_root, deferred_receipt,
-        floor_offset, followed_floor, next_ui_pitch, resident_status_text, rotate_hue,
-        selected_status_text, tile_to_world, update_selected_resident_marker,
+        floor_offset, followed_floor, format_clock, next_ui_pitch, resident_status_text,
+        rotate_hue, selected_status_text, tile_to_world, update_selected_resident_marker,
     };
     use bevy::prelude::{App, GlobalTransform, Transform, Update, Visibility};
+
+    #[test]
+    fn clock_formats_as_zero_padded_hours_and_minutes() {
+        assert_eq!(
+            format_clock(TimeOfDay {
+                hour: 16,
+                minute: 5
+            }),
+            "16:05"
+        );
+        assert_eq!(format_clock(TimeOfDay { hour: 9, minute: 0 }), "09:00");
+    }
 
     #[test]
     fn tiles_project_to_their_pixel_centres() {
@@ -1630,6 +1684,7 @@ mod tests {
     fn resident_card_has_a_clear_no_selection_state() {
         let snapshot = village_sim::CottageSnapshot {
             tick: 0,
+            time_of_day: village_sim::TimeOfDay { hour: 0, minute: 0 },
             floors: Vec::new(),
             objects: Vec::new(),
             residents: Vec::new(),
@@ -1857,6 +1912,10 @@ mod tests {
         let task = PlayerTaskId(28);
         let snapshot = village_sim::CottageSnapshot {
             tick: 8,
+            time_of_day: village_sim::TimeOfDay {
+                hour: 20,
+                minute: 15,
+            },
             floors: Vec::new(),
             objects: Vec::new(),
             residents: Vec::new(),
@@ -1901,6 +1960,10 @@ mod tests {
         let task = PlayerTaskId(30);
         let snapshot = village_sim::CottageSnapshot {
             tick: 8,
+            time_of_day: village_sim::TimeOfDay {
+                hour: 20,
+                minute: 15,
+            },
             floors: Vec::new(),
             objects: Vec::new(),
             residents: Vec::new(),
@@ -1930,6 +1993,7 @@ mod tests {
     fn cancellable_tasks_project_the_whole_queue_head_first() {
         let snapshot = village_sim::CottageSnapshot {
             tick: 0,
+            time_of_day: village_sim::TimeOfDay { hour: 0, minute: 0 },
             floors: Vec::new(),
             objects: Vec::new(),
             residents: vec![ClientResidentSnapshot {

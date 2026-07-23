@@ -20,6 +20,44 @@ use thiserror::Error;
 /// quickly ticks are consumed, never this value.
 pub const TICK_DURATION_MS: u64 = 250;
 
+/// The number of ticks that advance the in-world clock by one minute. One
+/// in-world minute per tick makes a full day 1440 ticks; the value is a fixed
+/// simulation semantic, unrelated to presentation speed.
+pub const TICKS_PER_IN_WORLD_MINUTE: u64 = 1;
+
+const MINUTES_PER_DAY: u32 = 24 * 60;
+
+/// A wall-clock time of day within a single 24-hour village day. The clock is
+/// deterministic: it is a pure function of the tick and the scenario's authored
+/// starting time, never of presentation speed.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct TimeOfDay {
+    pub hour: u8,
+    pub minute: u8,
+}
+
+impl TimeOfDay {
+    /// Builds a time of day from minutes since midnight, wrapping across a day.
+    #[must_use]
+    pub fn from_minute_of_day(minutes: u32) -> Self {
+        let minutes = minutes % MINUTES_PER_DAY;
+        Self {
+            hour: (minutes / 60) as u8,
+            minute: (minutes % 60) as u8,
+        }
+    }
+
+    /// Minutes elapsed since midnight.
+    #[must_use]
+    pub fn minute_of_day(self) -> u32 {
+        u32::from(self.hour) * 60 + u32::from(self.minute)
+    }
+}
+
+fn default_start_time_of_day() -> TimeOfDay {
+    TimeOfDay { hour: 8, minute: 0 }
+}
+
 /// A readable authored identifier, such as `person.newcomer_a`.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -97,6 +135,10 @@ pub struct ScenarioDefinition {
     pub map: DefinitionId,
     pub objects: Vec<DefinitionId>,
     pub placements: Vec<ResidentPlacement>,
+    /// The in-world time the scenario begins at. Defaults to morning so older
+    /// scenarios that omit it still load.
+    #[serde(default = "default_start_time_of_day")]
+    pub start_time_of_day: TimeOfDay,
 }
 
 /// An authored starting tile for a resident in a scenario.
@@ -588,6 +630,7 @@ pub struct Simulation {
     world: World,
     seed: u64,
     tick: u64,
+    start_minute_of_day: u32,
     next_sim_id: u64,
     residents: BTreeMap<SimId, Entity>,
     map: MapAsset,
@@ -615,6 +658,7 @@ pub struct Simulation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CottageSnapshot {
     pub tick: u64,
+    pub time_of_day: TimeOfDay,
     pub floors: Vec<FloorDefinition>,
     pub objects: Vec<SmartObjectDefinition>,
     pub residents: Vec<ClientResidentSnapshot>,
@@ -700,6 +744,7 @@ impl Simulation {
             world: World::new(),
             seed: content.scenario.seed,
             tick: 0,
+            start_minute_of_day: content.scenario.start_time_of_day.minute_of_day(),
             next_sim_id: 1,
             residents: BTreeMap::new(),
             map: content.map,
@@ -805,6 +850,16 @@ impl Simulation {
         self.tick
     }
 
+    /// The deterministic in-world time of day, derived from the tick and the
+    /// scenario's authored starting time.
+    #[must_use]
+    pub fn time_of_day(&self) -> TimeOfDay {
+        let elapsed_minutes = self.tick / TICKS_PER_IN_WORLD_MINUTE;
+        let minute_of_day =
+            (u64::from(self.start_minute_of_day) + elapsed_minutes) % u64::from(MINUTES_PER_DAY);
+        TimeOfDay::from_minute_of_day(minute_of_day as u32)
+    }
+
     /// Returns residents in stable `SimId` order, keeping Bevy entity IDs
     /// private to the implementation.
     #[must_use]
@@ -875,6 +930,7 @@ impl Simulation {
             .collect();
         CottageSnapshot {
             tick: self.tick,
+            time_of_day: self.time_of_day(),
             floors: self.map.floors.clone(),
             objects: self.objects.values().cloned().collect(),
             residents,
@@ -2188,6 +2244,56 @@ mod tests {
             },
         );
         id
+    }
+
+    #[test]
+    fn in_world_clock_advances_one_minute_per_tick_from_authored_start() {
+        let mut simulation = load_simulation();
+        assert_eq!(
+            simulation.time_of_day(),
+            TimeOfDay {
+                hour: 16,
+                minute: 0
+            }
+        );
+
+        for _ in 0..30 {
+            simulation.advance_tick();
+        }
+        let expected = TimeOfDay {
+            hour: 16,
+            minute: 30,
+        };
+        assert_eq!(simulation.time_of_day(), expected);
+        assert_eq!(simulation.cottage_snapshot().time_of_day, expected);
+    }
+
+    #[test]
+    fn time_of_day_maps_and_wraps_across_a_day() {
+        assert_eq!(
+            TimeOfDay::from_minute_of_day(0),
+            TimeOfDay { hour: 0, minute: 0 }
+        );
+        assert_eq!(
+            TimeOfDay::from_minute_of_day(23 * 60 + 59),
+            TimeOfDay {
+                hour: 23,
+                minute: 59
+            }
+        );
+        // A full day plus 90 minutes wraps to 01:30.
+        assert_eq!(
+            TimeOfDay::from_minute_of_day(24 * 60 + 90),
+            TimeOfDay {
+                hour: 1,
+                minute: 30
+            }
+        );
+        let quiz = TimeOfDay {
+            hour: 19,
+            minute: 0,
+        };
+        assert_eq!(TimeOfDay::from_minute_of_day(quiz.minute_of_day()), quiz);
     }
 
     #[test]

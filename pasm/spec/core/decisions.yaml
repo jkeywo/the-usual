@@ -32,6 +32,14 @@ entities:
       summary: Pause, 1x, 4x, and 16x alter tick consumption but never semantics. Each tick runs ingest orders/events, update world and needs, choose/revise plans, allocate capabilities, tick atomic actions, then resolve and publish events.
       references: [tick-driver, world-events]
 
+  - decision: in-world-day-clock
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Deterministic In-World Day Clock
+      summary: An in-world time of day derives deterministically from the tick at a fixed one in-world minute per tick, wrapping over a 24-hour day. Each scenario authors its starting time; the value is a pure function of tick and start, never of presentation speed, and the client renders it read-only. Time-bound village events such as invitations and opening hours reference this clock.
+      references: [deterministic-tick-and-phase-order, authoritative-client-projection]
+
   - decision: deferred-event-observability
     core:
       status: accepted

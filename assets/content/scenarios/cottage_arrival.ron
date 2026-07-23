@@ -1,6 +1,7 @@
 (
     id: "scenario.cottage_arrival",
     seed: 4243,
+    start_time_of_day: (hour: 16, minute: 0),
     people: [
         "person.newcomer_a",
         "person.newcomer_b",

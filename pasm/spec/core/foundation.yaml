@@ -51,6 +51,17 @@ entities:
       status: declared
       paths: [crates/village_sim/src/lib.rs]
 
+  - component: world-time
+    core:
+      status: implemented
+      confidence: confirmed
+      title: In-World Day Clock
+      summary: The simulation derives a deterministic wall-clock time of day from the tick and the scenario's authored starting time, at one in-world minute per tick wrapping over a day. It is exposed in the read-only Cottage snapshot and shown as a client HUD readout, and grounds the time-bound events of later milestones.
+      references: [tick-driver, in-world-day-clock, village-client]
+    implementation:
+      status: declared
+      paths: [crates/village_sim/src/lib.rs, crates/village_game/src/main.rs, assets/content/scenarios/cottage_arrival.ron]
+
   - component: agent-autonomy
     core:
       status: proposed
