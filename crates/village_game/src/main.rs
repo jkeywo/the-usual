@@ -953,6 +953,10 @@ fn semantic_event_label(
             "A neighbour invited the household to the {} quiz.",
             format_clock(*event_at)
         )),
+        WorldEventKind::QuizArrived { resident } => Some(format!(
+            "{} arrived at the King's Head for the quiz.",
+            resident_name(*resident)
+        )),
         WorldEventKind::PargeterSeatTaken {
             participant,
             witnessed_by,
@@ -1406,8 +1410,13 @@ fn resident_status_text(resident: &village_sim::ClientResidentSnapshot) -> Strin
         Some(ClientPerception::WitnessedPargeterSeat) => "\nPerception: tutted at the corner seat",
         None => "",
     };
+    let commitment = if resident.attending_quiz {
+        "\nTonight: the pub quiz"
+    } else {
+        ""
+    };
     format!(
-        "{}\nToilet need: {need}\nIntention: {intention}\n{tasks}{perception}",
+        "{}\nToilet need: {need}\nIntention: {intention}\n{tasks}{perception}{commitment}",
         resident.display_name
     )
 }
@@ -1704,6 +1713,7 @@ mod tests {
                     autonomous_intention: None,
                     player_tasks: Vec::new(),
                     recent_perception: Some(ClientPerception::TookPargeterSeat),
+                    attending_quiz: false,
                 },
                 ClientResidentSnapshot {
                     id: SimId(2),
@@ -1718,6 +1728,7 @@ mod tests {
                     autonomous_intention: None,
                     player_tasks: Vec::new(),
                     recent_perception: Some(ClientPerception::WitnessedPargeterSeat),
+                    attending_quiz: false,
                 },
             ],
         };
@@ -1738,6 +1749,48 @@ mod tests {
             [
                 "Rowan Bell took Mr Pargeter's corner seat. Mara Bell tuts. The household now know it is his."
             ]
+        );
+    }
+
+    #[test]
+    fn semantic_feed_announces_quiz_arrival() {
+        let snapshot = village_sim::CottageSnapshot {
+            tick: 200,
+            time_of_day: TimeOfDay {
+                hour: 19,
+                minute: 20,
+            },
+            household_knows_pargeter_custom: false,
+            floors: Vec::new(),
+            objects: Vec::new(),
+            residents: vec![ClientResidentSnapshot {
+                id: SimId(2),
+                definition_id: DefinitionId::new("person.newcomer_b"),
+                display_name: "Mara Bell".to_owned(),
+                position: TilePosition {
+                    floor: 0,
+                    x: 25,
+                    y: 18,
+                },
+                toilet_need: None,
+                autonomous_intention: None,
+                player_tasks: Vec::new(),
+                recent_perception: None,
+                attending_quiz: false,
+            }],
+        };
+        let events = [WorldEvent {
+            tick: 200,
+            kind: WorldEventKind::QuizArrived { resident: SimId(2) },
+        }];
+        let mut feed = SemanticEventFeed::default();
+        let mut outcomes = BTreeMap::new();
+
+        consume_semantic_events(&mut feed, &events, &snapshot, &mut outcomes);
+
+        assert_eq!(
+            feed.entries,
+            ["Mara Bell arrived at the King's Head for the quiz."]
         );
     }
 
@@ -1819,6 +1872,7 @@ mod tests {
                 },
             ],
             recent_perception: None,
+            attending_quiz: false,
         };
 
         assert_eq!(
@@ -2169,6 +2223,7 @@ mod tests {
                     },
                 ],
                 recent_perception: None,
+                attending_quiz: false,
             }],
         };
 

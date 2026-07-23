@@ -167,6 +167,19 @@ pub struct InvitationDefinition {
     pub invite_at: TimeOfDay,
     /// The in-world time of the event the household is invited to.
     pub event_at: TimeOfDay,
+    /// The tile the household gathers at for the event. Each committed resident
+    /// heads to this tile offset by their household order so they never target
+    /// the same tile.
+    pub venue_tile: TilePosition,
+}
+
+/// A resident's accepted, time-bound commitment to attend an event. It is a
+/// normal autonomous pursuit that yields to player orders and bodily needs; it
+/// never overrides autonomy.
+#[derive(Clone, Copy, Debug)]
+struct QuizCommitment {
+    destination: TilePosition,
+    active_from: TimeOfDay,
 }
 
 /// An authored starting tile for a resident in a scenario.
@@ -647,6 +660,10 @@ pub enum WorldEventKind {
         participant: SimId,
         witnessed_by: Vec<SimId>,
     },
+    /// A committed resident reached the pub for the quiz.
+    QuizArrived {
+        resident: SimId,
+    },
 }
 
 /// A resident's presentation-safe subjective take on a witnessed social
@@ -687,6 +704,7 @@ pub struct Simulation {
     start_minute_of_day: u32,
     invitations: Vec<InvitationDefinition>,
     fired_invitations: BTreeSet<usize>,
+    commitments: BTreeMap<SimId, QuizCommitment>,
     perceptions: BTreeMap<SimId, ClientPerception>,
     household_knowledge: BTreeSet<HouseholdKnowledge>,
     next_sim_id: u64,
@@ -741,6 +759,9 @@ pub struct ClientResidentSnapshot {
     pub player_tasks: Vec<ClientPlayerTaskSnapshot>,
     /// The resident's most recent subjective social perception, if any.
     pub recent_perception: Option<ClientPerception>,
+    /// Whether the resident holds an accepted, not-yet-fulfilled commitment to
+    /// attend the pub quiz.
+    pub attending_quiz: bool,
 }
 
 /// Presentation-safe names for the narrow set of autonomous intentions.
@@ -810,6 +831,7 @@ impl Simulation {
             start_minute_of_day: content.scenario.start_time_of_day.minute_of_day(),
             invitations: content.scenario.invitations,
             fired_invitations: BTreeSet::new(),
+            commitments: BTreeMap::new(),
             perceptions: BTreeMap::new(),
             household_knowledge: BTreeSet::new(),
             next_sim_id: 1,
@@ -993,6 +1015,7 @@ impl Simulation {
                         .then_some(ClientIntention::Toilet),
                     player_tasks,
                     recent_perception: self.perceptions.get(id).copied(),
+                    attending_quiz: self.commitments.contains_key(id),
                 }
             })
             .collect();
@@ -1198,6 +1221,7 @@ impl Simulation {
         self.fire_due_invitations();
         self.update_toilet_needs();
         self.choose_autonomous_toilet_plans();
+        self.pursue_commitments();
         self.dispatch_player_queues();
         self.tick_go_to();
         self.tick_object_uses();
@@ -1507,10 +1531,74 @@ impl Simulation {
         for index in due {
             self.fired_invitations.insert(index);
             let invitation = self.invitations[index].clone();
+            let venue_tile = invitation.venue_tile;
+            let event_at = invitation.event_at;
             self.emit(WorldEventKind::NeighbourInvitation {
                 host: invitation.host,
-                event_at: invitation.event_at,
+                event_at,
             });
+            self.record_invitation_commitments(venue_tile, event_at);
+        }
+    }
+
+    /// Turns a delivered invitation into a per-resident commitment: each
+    /// household member gains a pursuit toward a distinct tile at the venue,
+    /// active from the event time.
+    fn record_invitation_commitments(&mut self, venue_tile: TilePosition, event_at: TimeOfDay) {
+        let residents = self.residents.keys().copied().collect::<Vec<_>>();
+        for (index, resident) in residents.into_iter().enumerate() {
+            let offset = TilePosition {
+                x: venue_tile.x + index as i32,
+                ..venue_tile
+            };
+            let destination = if self.is_walkable(offset) {
+                offset
+            } else {
+                venue_tile
+            };
+            self.commitments.insert(
+                resident,
+                QuizCommitment {
+                    destination,
+                    active_from: event_at,
+                },
+            );
+        }
+    }
+
+    /// Drives accepted commitments once their time arrives. A commitment is a
+    /// normal autonomous pursuit in the Autonomous band: it yields to any
+    /// player queue and to an active bodily need, and simply travels to the
+    /// venue otherwise, announcing arrival once.
+    fn pursue_commitments(&mut self) {
+        let now = self.time_of_day();
+        let committed = self.commitments.keys().copied().collect::<Vec<_>>();
+        for resident in committed {
+            let commitment = *self
+                .commitments
+                .get(&resident)
+                .expect("resident was collected from commitments");
+            if now < commitment.active_from {
+                continue;
+            }
+            if self.resident_position(resident) == Some(commitment.destination) {
+                self.commitments.remove(&resident);
+                self.emit(WorldEventKind::QuizArrived { resident });
+                continue;
+            }
+            if self.resident_has_player_queue(resident)
+                || self.autonomous_toilet_intentions.contains(&resident)
+                || !self.resident_execution_slot_free(resident)
+            {
+                continue;
+            }
+            let _ = self.begin_go_to_banded(
+                resident,
+                commitment.destination,
+                0,
+                ActionBand::Autonomous,
+                None,
+            );
         }
     }
 
@@ -2448,6 +2536,102 @@ mod tests {
             simulation.advance_tick();
         }
         assert_eq!(invitation_count(&simulation), 1);
+    }
+
+    fn resident_snapshot(simulation: &Simulation, resident: SimId) -> ClientResidentSnapshot {
+        simulation
+            .cottage_snapshot()
+            .residents
+            .into_iter()
+            .find(|candidate| candidate.id == resident)
+            .expect("resident is present in the snapshot")
+    }
+
+    #[test]
+    fn the_invitation_commits_the_household_and_they_attend_after_it_starts() {
+        let mut simulation = load_simulation();
+        let attendee = SimId(2); // Mara has no toilet need to divert her.
+
+        // Run past the 16:30 invitation; the household accepts a commitment.
+        for _ in 0..31 {
+            simulation.advance_tick();
+        }
+        assert!(resident_snapshot(&simulation, attendee).attending_quiz);
+
+        // The commitment is dormant until the 19:00 event time.
+        assert_eq!(
+            simulation.resident_position(attendee),
+            Some(TilePosition {
+                floor: 0,
+                x: 2,
+                y: 2,
+            })
+        );
+
+        // Advance to and past 19:00; the committed resident travels to the pub.
+        for _ in 0..220 {
+            simulation.advance_tick();
+            if simulation
+                .event_ledger()
+                .iter()
+                .any(|event| event.kind == WorldEventKind::QuizArrived { resident: attendee })
+            {
+                break;
+            }
+        }
+        let venue = TilePosition {
+            floor: 0,
+            x: 25,
+            y: 18,
+        };
+        assert_eq!(simulation.resident_position(attendee), Some(venue));
+        assert!(
+            simulation
+                .event_ledger()
+                .iter()
+                .any(|event| { event.kind == WorldEventKind::QuizArrived { resident: attendee } })
+        );
+        // Fulfilled commitments clear.
+        assert!(!resident_snapshot(&simulation, attendee).attending_quiz);
+    }
+
+    #[test]
+    fn a_player_order_takes_precedence_over_the_quiz_commitment() {
+        let mut simulation = load_simulation();
+        let resident = SimId(2);
+        let elsewhere = TilePosition {
+            floor: 0,
+            x: 10,
+            y: 8,
+        };
+
+        // Give the resident a player order just before the quiz starts, so it
+        // is the in-flight work when the commitment tries to activate.
+        for _ in 0..178 {
+            simulation.advance_tick();
+        }
+        assert!(resident_snapshot(&simulation, resident).attending_quiz);
+        let task = PlayerTaskId(900);
+        simulation.submit_player_command(PlayerCommand::QueueGoTo {
+            task,
+            resident,
+            destination: elsewhere,
+            priority: 0,
+        });
+
+        // The commitment activates at 19:00 but yields to the player order, so
+        // the resident goes where the player sent them.
+        for _ in 0..40 {
+            simulation.advance_tick();
+            if simulation.resident_position(resident) == Some(elsewhere) {
+                break;
+            }
+        }
+        assert!(simulation.time_of_day() >= PUB_OPENS_AT);
+        assert_eq!(simulation.resident_position(resident), Some(elsewhere));
+        // The commitment was never overridden away — it is still held, ready to
+        // resume now the player queue is empty.
+        assert!(resident_snapshot(&simulation, resident).attending_quiz);
     }
 
     #[test]
