@@ -1,6 +1,6 @@
 //! Read-only Bevy presentation for the Cottage Contention fixture.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 use bevy::{asset::AssetPlugin, input::mouse::MouseWheel};
@@ -196,10 +196,7 @@ fn main() {
             DefaultPlugins
                 .set(ImagePlugin::default_nearest())
                 .set(AssetPlugin {
-                    file_path: workspace_root()
-                        .join("assets")
-                        .to_string_lossy()
-                        .into_owned(),
+                    file_path: asset_root(),
                     ..default()
                 }),
         )
@@ -251,10 +248,7 @@ fn setup_cottage(
     asset_server: Res<AssetServer>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
 ) {
-    let simulation = Simulation::from_content(
-        ScenarioContent::load_cottage_arrival(content_root()).expect("Cottage content loads"),
-    )
-    .expect("Cottage content resolves");
+    let simulation = Simulation::from_content(cottage_content()).expect("Cottage content resolves");
     let snapshot = simulation.cottage_snapshot();
     commands.insert_resource(SimulationDriver {
         simulation,
@@ -1635,12 +1629,42 @@ fn tile_to_world(x: i32, y: i32) -> Vec2 {
     )
 }
 
-fn content_root() -> PathBuf {
+/// The authoritative scenario content for the Cottage. On the web there is no
+/// filesystem, so the content is compiled in; native builds read the authored
+/// files so they can be edited without recompiling the simulation.
+#[cfg(target_arch = "wasm32")]
+fn cottage_content() -> ScenarioContent {
+    ScenarioContent::embedded_cottage_arrival().expect("embedded Cottage content resolves")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cottage_content() -> ScenarioContent {
+    ScenarioContent::load_cottage_arrival(content_root()).expect("Cottage content loads")
+}
+
+/// The Bevy asset root. On the web this is a relative path served alongside the
+/// page; native builds point at the workspace `assets` directory.
+#[cfg(target_arch = "wasm32")]
+fn asset_root() -> String {
+    "assets".to_owned()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn asset_root() -> String {
+    workspace_root()
+        .join("assets")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn content_root() -> std::path::PathBuf {
     workspace_root().join("assets/content")
 }
 
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+#[cfg(not(target_arch = "wasm32"))]
+fn workspace_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
 #[cfg(test)]

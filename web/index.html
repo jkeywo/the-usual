@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>The Usual</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0f1a;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+        outline: none;
+      }
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        color: #cfe3ff;
+        font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+        font-size: 18px;
+        letter-spacing: 0.02em;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="loading">Loading The Usual…</div>
+    <!-- The wasm-bindgen `--target web` output. Bevy creates and appends its
+         own canvas, so no <canvas> element is needed here. Paths are relative
+         so the page works from a GitHub Pages project subpath. -->
+    <script type="module">
+      import init from './village_game.js';
+      init()
+        .then(() => {
+          const loading = document.getElementById('loading');
+          if (loading) loading.remove();
+        })
+        .catch((error) => {
+          console.error(error);
+          const loading = document.getElementById('loading');
+          if (loading) loading.textContent = 'Failed to start: ' + error;
+        });
+    </script>
+  </body>
+</html>

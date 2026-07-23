@@ -1,0 +1,74 @@
+name: Deploy web build to GitHub Pages
+
+# Builds the Bevy client to WebAssembly and publishes it to GitHub Pages on
+# every push to the default branch. Enable it once under
+# Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; newer pushes cancel an in-flight run.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel (1.95.0); just add the wasm target.
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The CLI version must match the wasm-bindgen crate in Cargo.lock.
+      - name: Install wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.126
+
+      - name: Build client (wasm, release)
+        run: cargo build --release -p village_game --target wasm32-unknown-unknown
+
+      - name: Generate JS bindings
+        run: |
+          wasm-bindgen \
+            --no-typescript \
+            --target web \
+            --out-dir dist \
+            --out-name village_game \
+            target/wasm32-unknown-unknown/release/village_game.wasm
+
+      - name: Assemble site
+        run: |
+          cp web/index.html dist/
+          mkdir -p dist/assets
+          cp -r assets/client dist/assets/client
+          # Disable Jekyll so nothing is filtered out of the artifact.
+          touch dist/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

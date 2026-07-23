@@ -297,7 +297,8 @@ pub struct ScenarioContent {
 }
 
 impl ScenarioContent {
-    /// Loads the initial domain-separated RON fixture from a content root.
+    /// Loads the initial domain-separated RON fixture from a content root on
+    /// disk.
     pub fn load_cottage_arrival(content_root: impl AsRef<Path>) -> Result<Self, ContentError> {
         let content_root = content_root.as_ref();
         let scenario = load_ron(content_root.join("scenarios/cottage_arrival.ron"))?;
@@ -315,6 +316,38 @@ impl ScenarioContent {
             plans,
         })
     }
+
+    /// Builds the same Cottage Arrival content from RON embedded at compile
+    /// time, so it needs no filesystem. This is the load path for targets
+    /// without `std::fs`, such as `wasm32-unknown-unknown`.
+    pub fn embedded_cottage_arrival() -> Result<Self, ContentError> {
+        macro_rules! embedded {
+            ($relative:literal) => {
+                parse_ron(
+                    std::path::PathBuf::from(concat!("assets/content/", $relative)),
+                    include_str!(concat!("../../../assets/content/", $relative)),
+                )?
+            };
+        }
+        Ok(Self {
+            scenario: embedded!("scenarios/cottage_arrival.ron"),
+            people: embedded!("people/newcomers.ron"),
+            map: embedded!("maps/cottage.ron"),
+            objects: embedded!("objects/cottage.ron"),
+            conducts: vec![embedded!("conducts/human.ron")],
+            plans: vec![embedded!("plans/toilet_need.ron")],
+        })
+    }
+}
+
+fn parse_ron<T: for<'de> Deserialize<'de>>(
+    path: std::path::PathBuf,
+    source: &str,
+) -> Result<T, ContentError> {
+    ron::from_str(source).map_err(|source| ContentError::Parse {
+        path,
+        source: Box::new(source),
+    })
 }
 
 fn load_ron<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result<T, ContentError> {
@@ -323,10 +356,7 @@ fn load_ron<T: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result<T, C
         path: path.to_path_buf(),
         source,
     })?;
-    ron::from_str(&source).map_err(|source| ContentError::Parse {
-        path: path.to_path_buf(),
-        source: Box::new(source),
-    })
+    parse_ron(path.to_path_buf(), &source)
 }
 
 /// Errors loading or resolving authored scenario content.
@@ -2660,6 +2690,18 @@ mod tests {
             minute: 0,
         };
         assert_eq!(TimeOfDay::from_minute_of_day(quiz.minute_of_day()), quiz);
+    }
+
+    #[test]
+    fn embedded_content_matches_the_on_disk_fixture() {
+        let on_disk =
+            ScenarioContent::load_cottage_arrival(content_root()).expect("fixture loads from disk");
+        let embedded =
+            ScenarioContent::embedded_cottage_arrival().expect("fixture loads from embedded RON");
+        assert_eq!(
+            on_disk, embedded,
+            "compiled-in content must match the authored files"
+        );
     }
 
     #[test]
