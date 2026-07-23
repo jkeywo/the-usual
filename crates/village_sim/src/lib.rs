@@ -139,6 +139,23 @@ pub struct ScenarioDefinition {
     /// scenarios that omit it still load.
     #[serde(default = "default_start_time_of_day")]
     pub start_time_of_day: TimeOfDay,
+    /// Time-bound neighbour invitations the scenario schedules for the day.
+    #[serde(default)]
+    pub invitations: Vec<InvitationDefinition>,
+}
+
+/// An authored, time-bound invitation a neighbour extends to the household —
+/// for example the First Friday pub quiz. Firing it emits a world event; it
+/// never overrides autonomy directly.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InvitationDefinition {
+    /// The neighbour extending the invitation. It need not be a spawned
+    /// resident in this slice; the off-screen host is recorded for later work.
+    pub host: DefinitionId,
+    /// The in-world time the invitation is delivered.
+    pub invite_at: TimeOfDay,
+    /// The in-world time of the event the household is invited to.
+    pub event_at: TimeOfDay,
 }
 
 /// An authored starting tile for a resident in a scenario.
@@ -608,6 +625,11 @@ pub enum WorldEventKind {
         object: DefinitionId,
         affordance: DefinitionId,
     },
+    /// A time-bound neighbour invitation was delivered at its authored time.
+    NeighbourInvitation {
+        host: DefinitionId,
+        event_at: TimeOfDay,
+    },
 }
 
 fn keyed_draw(seed: u64, tick: u64, event_id: u64, purpose: u64) -> u64 {
@@ -631,6 +653,8 @@ pub struct Simulation {
     seed: u64,
     tick: u64,
     start_minute_of_day: u32,
+    invitations: Vec<InvitationDefinition>,
+    fired_invitations: BTreeSet<usize>,
     next_sim_id: u64,
     residents: BTreeMap<SimId, Entity>,
     map: MapAsset,
@@ -745,6 +769,8 @@ impl Simulation {
             seed: content.scenario.seed,
             tick: 0,
             start_minute_of_day: content.scenario.start_time_of_day.minute_of_day(),
+            invitations: content.scenario.invitations,
+            fired_invitations: BTreeSet::new(),
             next_sim_id: 1,
             residents: BTreeMap::new(),
             map: content.map,
@@ -1124,6 +1150,7 @@ impl Simulation {
         self.tick += 1;
 
         self.ingest_player_commands();
+        self.fire_due_invitations();
         self.update_toilet_needs();
         self.choose_autonomous_toilet_plans();
         self.dispatch_player_queues();
@@ -1416,6 +1443,30 @@ impl Simulation {
     fn finish_player_task(&mut self, resident: SimId, task: PlayerTaskId, state: PlayerTaskState) {
         self.player_tasks.insert(task, state);
         self.remove_task_from_queue(resident, task);
+    }
+
+    /// Emits each scheduled invitation exactly once, when the in-world clock
+    /// first reaches its authored delivery time.
+    fn fire_due_invitations(&mut self) {
+        let now = self.time_of_day().minute_of_day();
+        let due = self
+            .invitations
+            .iter()
+            .enumerate()
+            .filter(|(index, invitation)| {
+                !self.fired_invitations.contains(index)
+                    && now >= invitation.invite_at.minute_of_day()
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        for index in due {
+            self.fired_invitations.insert(index);
+            let invitation = self.invitations[index].clone();
+            self.emit(WorldEventKind::NeighbourInvitation {
+                host: invitation.host,
+                event_at: invitation.event_at,
+            });
+        }
     }
 
     fn ingest_player_commands(&mut self) {
@@ -2266,6 +2317,51 @@ mod tests {
         };
         assert_eq!(simulation.time_of_day(), expected);
         assert_eq!(simulation.cottage_snapshot().time_of_day, expected);
+    }
+
+    fn invitation_count(simulation: &Simulation) -> usize {
+        simulation
+            .event_ledger()
+            .iter()
+            .filter(|event| matches!(event.kind, WorldEventKind::NeighbourInvitation { .. }))
+            .count()
+    }
+
+    #[test]
+    fn neighbour_invitation_fires_exactly_once_at_its_authored_time() {
+        let mut simulation = load_simulation();
+
+        // Nothing before 16:30 (start 16:00, one minute per tick).
+        for _ in 0..29 {
+            simulation.advance_tick();
+        }
+        assert_eq!(invitation_count(&simulation), 0);
+
+        simulation.advance_tick();
+        assert_eq!(
+            simulation.time_of_day(),
+            TimeOfDay {
+                hour: 16,
+                minute: 30
+            }
+        );
+        assert_eq!(invitation_count(&simulation), 1);
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::NeighbourInvitation {
+                    host: DefinitionId::new("person.neighbour"),
+                    event_at: TimeOfDay {
+                        hour: 19,
+                        minute: 0,
+                    },
+                }
+        }));
+
+        // It never fires a second time as the evening continues.
+        for _ in 0..30 {
+            simulation.advance_tick();
+        }
+        assert_eq!(invitation_count(&simulation), 1);
     }
 
     #[test]

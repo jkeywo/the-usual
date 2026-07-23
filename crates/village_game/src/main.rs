@@ -941,6 +941,10 @@ fn semantic_event_label(
                 resident_name(*resident)
             ))
         }
+        WorldEventKind::NeighbourInvitation { event_at, .. } => Some(format!(
+            "A neighbour invited the household to the {} quiz.",
+            format_clock(*event_at)
+        )),
         _ => None,
     }
 }
@@ -1627,6 +1631,39 @@ mod tests {
             "16:05"
         );
         assert_eq!(format_clock(TimeOfDay { hour: 9, minute: 0 }), "09:00");
+    }
+
+    #[test]
+    fn semantic_feed_announces_a_neighbour_invitation() {
+        let snapshot = village_sim::CottageSnapshot {
+            tick: 30,
+            time_of_day: TimeOfDay {
+                hour: 16,
+                minute: 30,
+            },
+            floors: Vec::new(),
+            objects: Vec::new(),
+            residents: Vec::new(),
+        };
+        let events = [WorldEvent {
+            tick: 30,
+            kind: WorldEventKind::NeighbourInvitation {
+                host: DefinitionId::new("person.neighbour"),
+                event_at: TimeOfDay {
+                    hour: 19,
+                    minute: 0,
+                },
+            },
+        }];
+        let mut feed = SemanticEventFeed::default();
+        let mut outcomes = BTreeMap::new();
+
+        consume_semantic_events(&mut feed, &events, &snapshot, &mut outcomes);
+
+        assert_eq!(
+            feed.entries,
+            ["A neighbour invited the household to the 19:00 quiz."]
+        );
     }
 
     #[test]

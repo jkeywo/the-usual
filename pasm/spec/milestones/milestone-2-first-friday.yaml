@@ -12,8 +12,8 @@ entities:
       status: proposed
       confidence: confirmed
       title: Neighbour Invitation and Time-Bound Commitment
-      summary: Around 16:30 a neighbour can invite the household to a 19:00 pub quiz. The invitation creates a normal commitment or reaction candidate, never a direct override of autonomy. Its timing is read from the deterministic in-world day clock.
-      references: [agent-autonomy, player-command-boundary, world-time]
+      summary: Around 16:30, read from the deterministic in-world day clock, a scheduled neighbour invitation fires exactly once and publishes a NeighbourInvitation world event naming its host and the 19:00 event time; the client announces it. Turning that invitation into a normal commitment or reaction candidate that competes for autonomy, never a direct override, remains the next step.
+      references: [agent-autonomy, player-command-boundary, world-time, world-events]
 
   - component: pub-visit-and-contention
     core:
