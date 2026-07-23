@@ -981,10 +981,19 @@ fn update_semantic_event_feed_text(
     text.0 = feed.entries.join("\n");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn client_audio_seed() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos() as u64)
+}
+
+// `std::time::SystemTime` panics on `wasm32-unknown-unknown` ("time not
+// implemented on this platform"). The UI pitch variation is cosmetic and never
+// feeds the simulation, so a fixed seed is acceptable on the web.
+#[cfg(target_arch = "wasm32")]
+fn client_audio_seed() -> u64 {
+    0x9E37_79B9_7F4A_7C15
 }
 
 fn next_ui_pitch(variation: &mut UiAudioVariation) -> f32 {
