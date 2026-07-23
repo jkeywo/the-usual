@@ -402,9 +402,7 @@ fn setup_cottage(
                 furniture.clone(),
                 TextureAtlas {
                     layout: furniture_layout.clone(),
-                    // Row 12, column 0 is the fixture's toilet. Row 4 was
-                    // a wardrobe, which made the supplied toilet read wrong.
-                    index: 144,
+                    index: furniture_atlas_index(&object.object_type),
                 },
             ),
             Transform::from_xyz(position.x, position.y, 2.0)
@@ -442,6 +440,16 @@ fn setup_cottage(
 
 fn format_clock(time: TimeOfDay) -> String {
     format!("{:02}:{:02}", time.hour, time.minute)
+}
+
+/// Maps an authored object type to a placeholder furniture atlas cell. Cell
+/// 144 is the toilet; the King's Head bar uses a distinct cell until finished
+/// art arrives, so it never masquerades as another fixture.
+fn furniture_atlas_index(object_type: &DefinitionId) -> usize {
+    match object_type.0.as_str() {
+        "object_type.bar" => 108,
+        _ => 144,
+    }
 }
 
 fn spawn_status_card(
@@ -1616,10 +1624,23 @@ mod tests {
         PendingOrder, ResidentVisual, SelectedResident, SelectedResidentMarker, SemanticEventFeed,
         UiAudioVariation, apply_floor_focus, bounded_zoom, cancellable_tasks,
         consume_order_receipt, consume_semantic_events, content_root, deferred_receipt,
-        floor_offset, followed_floor, format_clock, next_ui_pitch, resident_status_text,
-        rotate_hue, selected_status_text, tile_to_world, update_selected_resident_marker,
+        floor_offset, followed_floor, format_clock, furniture_atlas_index, next_ui_pitch,
+        resident_status_text, rotate_hue, selected_status_text, tile_to_world,
+        update_selected_resident_marker,
     };
     use bevy::prelude::{App, GlobalTransform, Transform, Update, Visibility};
+
+    #[test]
+    fn furniture_index_distinguishes_the_bar_from_the_toilet() {
+        assert_eq!(
+            furniture_atlas_index(&DefinitionId::new("object_type.bar")),
+            108
+        );
+        assert_eq!(
+            furniture_atlas_index(&DefinitionId::new("object_type.toilet")),
+            144
+        );
+    }
 
     #[test]
     fn clock_formats_as_zero_padded_hours_and_minutes() {

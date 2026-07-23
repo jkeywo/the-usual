@@ -2467,6 +2467,45 @@ mod tests {
     }
 
     #[test]
+    fn a_resident_can_travel_from_the_cottage_to_the_kings_head_bar() {
+        let mut simulation = load_simulation();
+        let resident = SimId(1);
+        let bar = TilePosition {
+            floor: 0,
+            x: 26,
+            y: 18,
+        };
+        // The bar is an authored object at the pub end of the ground floor.
+        assert!(
+            simulation
+                .cottage_snapshot()
+                .objects
+                .iter()
+                .any(
+                    |object| object.id == DefinitionId::new("object.kings_head_bar")
+                        && object.position == bar
+                )
+        );
+
+        assert!(simulation.begin_go_to(resident, bar));
+        for _ in 0..64 {
+            simulation.advance_tick();
+            if simulation.resident_position(resident) == Some(bar) {
+                break;
+            }
+        }
+        assert_eq!(simulation.resident_position(resident), Some(bar));
+        simulation.advance_tick();
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::GoToArrived {
+                    resident,
+                    destination: bar,
+                }
+        }));
+    }
+
+    #[test]
     fn go_to_uses_the_paired_stair_portal_and_emits_arrival() {
         let mut simulation = load_simulation();
         let resident = SimId(1);

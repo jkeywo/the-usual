@@ -14,5 +14,21 @@
                 ),
             ],
         ),
+        // The King's Head bar, across the open ground from the cottage. Its
+        // single service slot is the contested resource for pub visits.
+        (
+            id: "object.kings_head_bar",
+            object_type: "object_type.bar",
+            position: (floor: 0, x: 26, y: 18),
+            slots: [(id: "slot.serve")],
+            affordances: [
+                (
+                    id: "affordance.order_drink",
+                    slot: "slot.serve",
+                    capability: Hands,
+                    duration_ticks: 2,
+                ),
+            ],
+        ),
     ],
 )
