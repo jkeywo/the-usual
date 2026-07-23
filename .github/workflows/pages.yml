@@ -25,6 +25,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Enables Pages (Actions source) on first run so the deploy job can
+      # publish without a manual Settings change.
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
       # rust-toolchain.toml pins the channel (1.95.0); just add the wasm target.
       - name: Add wasm target
         run: rustup target add wasm32-unknown-unknown
