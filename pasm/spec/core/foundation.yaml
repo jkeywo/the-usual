@@ -140,8 +140,8 @@ entities:
       status: implemented
       confidence: confirmed
       title: Player Command Boundary
-      summary: The simulation now ingests typed QueueUseToilet and CancelPlayerTask commands on the next tick. Stable caller task IDs receive deferred accepted or rejected receipts; cancellation at the next atomic safe boundary releases the live object slot and hands capability, then emits TaskCancelled instead of completion. Wider household queue modes and ordinary AI plan routing remain later work.
-      references: [agent-autonomy, village-client]
+      summary: The simulation ingests typed QueueGoTo, QueueUseToilet, and CancelPlayerTask commands on the next tick. Each resident holds an ordered player task queue; only its head dispatches into the execution engine, later orders wait, and every listed task is individually cancellable by its stable caller ID. Stable IDs receive deferred accepted or rejected receipts; cancellation at the next atomic safe boundary releases any live object slot and hands capability, then emits TaskCancelled or GoToCancelled instead of completion. An urgent need preempts the queue head under the priority bands, pausing rather than cancelling it. Ordinary AI plan routing beyond the toilet need remains later work.
+      references: [agent-autonomy, village-client, action-priority-bands]
     implementation:
       status: declared
       paths: [crates/village_sim/src/lib.rs]

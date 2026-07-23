@@ -60,9 +60,9 @@ entities:
     core:
       status: implemented
       confidence: confirmed
-      title: Deferred Player Toilet Order and Cancellation
-      summary: The Cottage fixture accepts a typed QueueUseToilet command at the following tick, returns immutable accepted or rejected receipts on the normal deferred-event path, and cancels active or queued player tasks at their atomic safe boundary. Active cancellation releases the toilet slot and hands claim before TaskCancelled is published.
-      references: [player-command-boundary, cottage-needs-and-affordances, cottage-contention-test]
+      title: Deferred Player Order Queue and Cancellation
+      summary: The Cottage fixture accepts typed QueueGoTo and QueueUseToilet commands at the following tick and appends each to the addressed resident's ordered player task queue; only the head dispatches while later orders wait. It returns immutable accepted or rejected receipts on the normal deferred-event path and cancels any listed task by its stable ID at the atomic safe boundary, whether queued, active, or urgent-paused. Active cancellation releases the toilet slot and hands claim before TaskCancelled, and a movement cancellation emits GoToCancelled.
+      references: [player-command-boundary, action-priority-bands, cottage-needs-and-affordances, cottage-contention-test]
     implementation:
       status: declared
       paths: [crates/village_sim/src/lib.rs]
@@ -83,7 +83,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Selected Newcomer Status Card
-      summary: The Cottage client keeps presentation-only resident selection. Clicking a newcomer or their curated UI selector shows their authoritative display name, Toilet need, autonomous Toilet intention, and current queued or active player tasks as a readable list from the immutable Cottage snapshot. Each cancellable listed task is exposed by its stable-ID cancel control. No selection state or UI interaction mutates simulation state.
+      summary: The Cottage client keeps presentation-only resident selection. Clicking a newcomer or their curated UI selector shows their authoritative display name, Toilet need, autonomous Toilet intention, and their whole player task queue, head first, as a readable list of queued, active, or urgent-paused tasks from the immutable Cottage snapshot. Each listed task is exposed by its own stable-ID cancel control. No selection state or UI interaction mutates simulation state.
       references: [village-client, agent-autonomy, player-command-boundary]
     implementation:
       status: declared
@@ -116,7 +116,7 @@ entities:
       status: implemented
       confidence: confirmed
       title: Contended Player Task Cancellation Feedback
-      summary: The selected newcomer exposes Cancel only while their immutable Cottage snapshot has a queued or active player task. The client submits CancelPlayerTask at the normal deferred boundary, names its receipt as a cancellation, and consumes semantic waiting, start, completion, and cancellation events from the append-only ledger once. Active cancellation visibly reports that the toilet was released, after which the waiting request can progress under simulation authority.
+      summary: The selected newcomer exposes one Cancel control per listed player task while their immutable Cottage snapshot shows it as queued, active, or urgent-paused. The client submits CancelPlayerTask for that specific task at the normal deferred boundary, names its receipt as a cancellation, and consumes semantic waiting, start, completion, and cancellation events from the append-only ledger once. Active cancellation visibly reports that the toilet was released, after which the waiting request can progress under simulation authority.
       references: [village-client, player-command-boundary, cottage-player-order-cancellation]
     implementation:
       status: declared
@@ -127,8 +127,8 @@ entities:
       status: implemented
       confidence: confirmed
       title: Physical Toilet Need and Right-Click Move
-      summary: Rowan begins with an authored decaying Toilet need. On activation, the autonomous Human plan navigates to the authored toilet tile before entering normal contention and use; recovery still follows ObjectUseCompleted only. Navigation replans deterministically around live resident tile occupancy and other residents' immediate movement destinations when its next route step becomes blocked. Selecting a newcomer and short right-clicking visible ground submits a deferred typed QueueGoTo task for that tile, while right-drag remains camera pan.
-      references: [agent-autonomy, tile-navigation, player-command-boundary, cottage-needs-and-affordances]
+      summary: Rowan begins with an authored decaying Toilet need. On activation, the autonomous Human plan navigates to the authored toilet tile before entering normal contention and use; recovery still follows ObjectUseCompleted only. Below its authored urgent threshold the need yields to any player order; at or above it the need escalates to the Urgent band, preempting the player queue head, which pauses and resumes after recovery. Navigation replans deterministically around live resident tile occupancy and other residents' immediate movement destinations when its next route step becomes blocked. Selecting a newcomer and short right-clicking visible ground submits a deferred typed QueueGoTo task for that tile, while right-drag remains camera pan.
+      references: [agent-autonomy, tile-navigation, player-command-boundary, action-priority-bands, cottage-needs-and-affordances]
     implementation:
       status: declared
       paths: [assets/content/people/newcomers.ron, assets/content/objects/cottage.ron, crates/village_sim/src/lib.rs, crates/village_game/src/main.rs]

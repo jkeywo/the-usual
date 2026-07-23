@@ -16,6 +16,10 @@ const TILE_PIXELS: f32 = 32.0;
 const ACTOR_AND_FURNITURE_SCALE: f32 = 2.0;
 const CHARACTER_COLUMNS: u32 = 8;
 const CLOTHING_FIRST_INDEX: usize = 32;
+/// The number of listed player tasks the card exposes an individual cancel
+/// control for. A resident's queue is not expected to grow past this in the
+/// Cottage fixture; deeper queues simply show their first few cancel buttons.
+const CANCEL_SLOTS: usize = 4;
 
 #[derive(Resource)]
 struct SimulationDriver {
@@ -73,11 +77,28 @@ struct OrderFeedbackText;
 #[derive(Component)]
 struct UseToiletButton;
 
+/// One of a fixed pool of per-task cancel controls. Its `index` addresses the
+/// selected resident's player task list, head first.
 #[derive(Component)]
-struct CancelPlayerTaskButton;
+struct CancelTaskSlot {
+    index: usize,
+}
 
 #[derive(Component)]
-struct CancelPlayerTaskText;
+struct CancelSlotText {
+    index: usize,
+}
+
+/// The task (and its snapshot state at bind time) each cancel slot currently
+/// targets. Rebuilt every frame from the selected resident's projected queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CancelBinding {
+    task: PlayerTaskId,
+    outcome: CancellationOutcome,
+}
+
+#[derive(Default, Resource)]
+struct CancelBindings([Option<CancelBinding>; CANCEL_SLOTS]);
 
 #[derive(Component)]
 struct SemanticEventFeedText;
@@ -118,6 +139,7 @@ enum PendingAction {
 enum CancellationOutcome {
     Queued,
     Active,
+    Paused,
 }
 
 /// Cursor for the append-only immutable event ledger. This keeps display
@@ -208,7 +230,7 @@ fn main() {
                     update_order_feedback,
                     update_order_feedback_text,
                     correct_pending_action_feedback_text,
-                    update_cancel_button,
+                    update_cancel_slots,
                     update_semantic_event_feed,
                     update_semantic_event_feed_text,
                 )
@@ -246,6 +268,7 @@ fn setup_cottage(
         ..default()
     });
     commands.insert_resource(SemanticEventFeed::default());
+    commands.insert_resource(CancelBindings::default());
     commands.insert_resource(UiAudioVariation(client_audio_seed()));
     // The authored cottage occupies positive tile coordinates. Centre the
     // initial ground-floor view on its bounds rather than the empty world
@@ -476,31 +499,34 @@ fn spawn_status_card(
                 TextColor(Color::srgb(0.78, 0.9, 1.0)),
                 OrderFeedbackText,
             ));
-            // It starts hidden and becomes available only while the selected
-            // resident has an authoritative queued or active player task.
-            card.spawn((
-                Button,
-                Node {
-                    width: Val::Percent(100.0),
-                    height: Val::Px(38.0),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    ..default()
-                },
-                ImageNode::new(button.clone()),
-                Visibility::Hidden,
-                CancelPlayerTaskButton,
-            ))
-            .with_child((
-                Text::new("Cancel task"),
-                TextFont {
-                    font: font.clone(),
-                    font_size: 18.0,
-                    ..default()
-                },
-                TextColor(Color::srgb(0.04, 0.08, 0.12)),
-                CancelPlayerTaskText,
-            ));
+            // One cancel control per listed task. Each starts hidden and
+            // becomes available only while the selected resident's queue has a
+            // task at that position.
+            for index in 0..CANCEL_SLOTS {
+                card.spawn((
+                    Button,
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(34.0),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    ImageNode::new(button.clone()),
+                    Visibility::Hidden,
+                    CancelTaskSlot { index },
+                ))
+                .with_child((
+                    Text::new("Cancel task"),
+                    TextFont {
+                        font: font.clone(),
+                        font_size: 16.0,
+                        ..default()
+                    },
+                    TextColor(Color::srgb(0.04, 0.08, 0.12)),
+                    CancelSlotText { index },
+                ));
+            }
             card.spawn((
                 Text::new(""),
                 TextFont {
@@ -580,8 +606,8 @@ fn submit_selected_toilet_order(
         order.receipt = Some("Select a newcomer before ordering.".to_owned());
         return;
     };
-    if order.pending.is_some() || selected_resident_has_player_task(resident, &driver.current) {
-        order.receipt = Some("That newcomer already has a player task.".to_owned());
+    if order.pending.is_some() {
+        order.receipt = Some("An order is already pending; wait for its receipt.".to_owned());
         return;
     }
 
@@ -610,76 +636,57 @@ fn submit_selected_toilet_order(
 fn submit_selected_task_cancellation(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    mut buttons: Query<&Interaction, (With<CancelPlayerTaskButton>, Changed<Interaction>)>,
-    selected: Res<SelectedResident>,
+    slots: Query<(&Interaction, &CancelTaskSlot), Changed<Interaction>>,
+    bindings: Res<CancelBindings>,
     mut driver: ResMut<SimulationDriver>,
     mut order: ResMut<OrderState>,
     mut audio_variation: ResMut<UiAudioVariation>,
 ) {
-    if !buttons
-        .iter_mut()
-        .any(|interaction| *interaction == Interaction::Pressed)
-    {
-        return;
-    }
-    let Some(task) = selected_task_to_cancel(selected.0, &driver.current) else {
-        return;
-    };
-    let outcome = selected_cancellation_outcome(selected.0, &driver.current)
-        .expect("the selected cancellable task has an authoritative state");
     if order.pending.is_some() {
         return;
     }
+    let Some(binding) = slots.iter().find_map(|(interaction, slot)| {
+        (*interaction == Interaction::Pressed)
+            .then(|| bindings.0.get(slot.index).copied().flatten())
+            .flatten()
+    }) else {
+        return;
+    };
     driver
         .simulation
-        .submit_player_command(PlayerCommand::CancelPlayerTask { task });
+        .submit_player_command(PlayerCommand::CancelPlayerTask { task: binding.task });
     order.pending = Some(PendingOrder {
-        task,
-        action: PendingAction::Cancellation(outcome),
+        task: binding.task,
+        action: PendingAction::Cancellation(binding.outcome),
         receipt_start: driver.simulation.event_ledger().len(),
     });
-    order.cancellation_outcomes.insert(task, outcome);
+    order
+        .cancellation_outcomes
+        .insert(binding.task, binding.outcome);
     order.receipt = None;
     play_ui_click(&mut commands, &asset_server, &mut audio_variation);
 }
 
-fn selected_resident_has_player_task(resident: SimId, snapshot: &CottageSnapshot) -> bool {
-    snapshot
-        .residents
-        .iter()
-        .find(|candidate| candidate.id == resident)
-        .is_some_and(|candidate| candidate.player_task.is_some())
-}
-
-fn selected_task_to_cancel(
-    selected: Option<SimId>,
-    snapshot: &CottageSnapshot,
-) -> Option<PlayerTaskId> {
-    selected.and_then(|id| {
-        snapshot
-            .residents
-            .iter()
-            .find(|resident| resident.id == id)
-            .and_then(|resident| resident.player_task)
-            .map(|task| task.id)
-    })
-}
-
-fn selected_cancellation_outcome(
-    selected: Option<SimId>,
-    snapshot: &CottageSnapshot,
-) -> Option<CancellationOutcome> {
-    selected.and_then(|id| {
-        snapshot
-            .residents
-            .iter()
-            .find(|resident| resident.id == id)
-            .and_then(|resident| resident.player_task)
-            .map(|task| match task.state {
-                ClientPlayerTaskState::Queued => CancellationOutcome::Queued,
-                ClientPlayerTaskState::Active => CancellationOutcome::Active,
-            })
-    })
+/// Projects the selected resident's cancellable player tasks, head first, each
+/// paired with the snapshot state that decides its cancellation wording.
+fn cancellable_tasks(selected: Option<SimId>, snapshot: &CottageSnapshot) -> Vec<CancelBinding> {
+    selected
+        .and_then(|id| snapshot.residents.iter().find(|resident| resident.id == id))
+        .map(|resident| {
+            resident
+                .player_tasks
+                .iter()
+                .map(|task| CancelBinding {
+                    task: task.id,
+                    outcome: match task.state {
+                        ClientPlayerTaskState::Queued => CancellationOutcome::Queued,
+                        ClientPlayerTaskState::Active => CancellationOutcome::Active,
+                        ClientPlayerTaskState::Paused => CancellationOutcome::Paused,
+                    },
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Consumes an immutable receipt exactly once from the simulation's published
@@ -761,31 +768,50 @@ fn update_order_feedback_text(
     );
 }
 
-fn update_cancel_button(
+fn update_cancel_slots(
     selected: Res<SelectedResident>,
     driver: Res<SimulationDriver>,
     order: Res<OrderState>,
-    mut buttons: Query<&mut Visibility, With<CancelPlayerTaskButton>>,
-    mut labels: Query<&mut Text, With<CancelPlayerTaskText>>,
+    mut bindings: ResMut<CancelBindings>,
+    mut slots: Query<(&CancelTaskSlot, &mut Visibility)>,
+    mut labels: Query<(&CancelSlotText, &mut Text)>,
 ) {
     if !selected.is_changed() && !driver.is_changed() && !order.is_changed() {
         return;
     }
-    let enabled =
-        order.pending.is_none() && selected_task_to_cancel(selected.0, &driver.current).is_some();
-    for mut visibility in &mut buttons {
-        *visibility = if enabled {
+    // A cancel is only offered while no command is already in flight.
+    let tasks = if order.pending.is_some() {
+        Vec::new()
+    } else {
+        cancellable_tasks(selected.0, &driver.current)
+    };
+    bindings.0 = std::array::from_fn(|index| tasks.get(index).copied());
+    for (slot, mut visibility) in &mut slots {
+        *visibility = if bindings.0.get(slot.index).copied().flatten().is_some() {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
     }
-    let label = selected_task_to_cancel(selected.0, &driver.current).map_or_else(
-        || "Cancel task".to_owned(),
-        |task| format!("Cancel task #{}", task.0),
-    );
-    for mut text in &mut labels {
-        text.0 = label.clone();
+    for (label, mut text) in &mut labels {
+        text.0 = bindings.0.get(label.index).copied().flatten().map_or_else(
+            || "Cancel task".to_owned(),
+            |binding| {
+                format!(
+                    "Cancel #{} {}",
+                    binding.task.0,
+                    cancel_state_word(binding.outcome)
+                )
+            },
+        );
+    }
+}
+
+fn cancel_state_word(outcome: CancellationOutcome) -> &'static str {
+    match outcome {
+        CancellationOutcome::Queued => "queued",
+        CancellationOutcome::Active => "active",
+        CancellationOutcome::Paused => "paused",
     }
 }
 
@@ -810,6 +836,7 @@ fn correct_pending_action_feedback_text(
     text.0 = match outcome {
         CancellationOutcome::Queued => format!("Removing queued order #{}...", task.0),
         CancellationOutcome::Active => format!("Cancelling active order #{}...", task.0),
+        CancellationOutcome::Paused => format!("Removing paused order #{}...", task.0),
     };
 }
 
@@ -874,6 +901,7 @@ fn semantic_event_label(
             let outcome_label = match outcome {
                 CancellationOutcome::Queued => "removed from queue",
                 CancellationOutcome::Active => "toilet released",
+                CancellationOutcome::Paused => "removed from queue",
             };
             Some(format!(
                 "Order #{} for {} cancelled; {outcome_label}.",
@@ -1285,13 +1313,20 @@ fn resident_status_text(resident: &village_sim::ClientResidentSnapshot) -> Strin
         Some(ClientIntention::Toilet) => "Use toilet",
         None => "None",
     };
-    let tasks = resident.player_task.map_or_else(
-        || "Current tasks:\n- None".to_owned(),
-        |task| match task.state {
-            ClientPlayerTaskState::Queued => format!("Current tasks:\n- #{} queued", task.id.0),
-            ClientPlayerTaskState::Active => format!("Current tasks:\n- #{} active", task.id.0),
-        },
-    );
+    let tasks = if resident.player_tasks.is_empty() {
+        "Current tasks:\n- None".to_owned()
+    } else {
+        let mut lines = String::from("Current tasks:");
+        for task in &resident.player_tasks {
+            let state = match task.state {
+                ClientPlayerTaskState::Queued => "queued",
+                ClientPlayerTaskState::Active => "active",
+                ClientPlayerTaskState::Paused => "paused",
+            };
+            lines.push_str(&format!("\n- #{} {state}", task.id.0));
+        }
+        lines
+    };
     format!(
         "{}\nToilet need: {need}\nIntention: {intention}\n{tasks}",
         resident.display_name
@@ -1531,12 +1566,12 @@ mod tests {
     };
 
     use super::{
-        CancellationOutcome, CottageCamera, FloorVisual, OrderState, PendingAction, PendingOrder,
-        ResidentVisual, SelectedResident, SelectedResidentMarker, SemanticEventFeed,
-        UiAudioVariation, apply_floor_focus, bounded_zoom, consume_order_receipt,
-        consume_semantic_events, content_root, deferred_receipt, floor_offset, followed_floor,
-        next_ui_pitch, resident_status_text, rotate_hue, selected_status_text,
-        selected_task_to_cancel, tile_to_world, update_selected_resident_marker,
+        CancelBinding, CancellationOutcome, CottageCamera, FloorVisual, OrderState, PendingAction,
+        PendingOrder, ResidentVisual, SelectedResident, SelectedResidentMarker, SemanticEventFeed,
+        UiAudioVariation, apply_floor_focus, bounded_zoom, cancellable_tasks,
+        consume_order_receipt, consume_semantic_events, content_root, deferred_receipt,
+        floor_offset, followed_floor, next_ui_pitch, resident_status_text, rotate_hue,
+        selected_status_text, tile_to_world, update_selected_resident_marker,
     };
     use bevy::prelude::{App, GlobalTransform, Transform, Update, Visibility};
 
@@ -1569,15 +1604,25 @@ mod tests {
             },
             toilet_need: Some(50),
             autonomous_intention: Some(ClientIntention::Toilet),
-            player_task: Some(ClientPlayerTaskSnapshot {
-                id: PlayerTaskId(7),
-                state: ClientPlayerTaskState::Queued,
-            }),
+            player_tasks: vec![
+                ClientPlayerTaskSnapshot {
+                    id: PlayerTaskId(7),
+                    state: ClientPlayerTaskState::Active,
+                },
+                ClientPlayerTaskSnapshot {
+                    id: PlayerTaskId(8),
+                    state: ClientPlayerTaskState::Queued,
+                },
+                ClientPlayerTaskSnapshot {
+                    id: PlayerTaskId(9),
+                    state: ClientPlayerTaskState::Paused,
+                },
+            ],
         };
 
         assert_eq!(
             resident_status_text(&resident),
-            "Rowan Bell\nToilet need: 50\nIntention: Use toilet\nCurrent tasks:\n- #7 queued"
+            "Rowan Bell\nToilet need: 50\nIntention: Use toilet\nCurrent tasks:\n- #7 active\n- #8 queued\n- #9 paused"
         );
     }
 
@@ -1882,7 +1927,7 @@ mod tests {
     }
 
     #[test]
-    fn only_an_authoritative_player_task_can_be_cancelled() {
+    fn cancellable_tasks_project_the_whole_queue_head_first() {
         let snapshot = village_sim::CottageSnapshot {
             tick: 0,
             floors: Vec::new(),
@@ -1898,19 +1943,34 @@ mod tests {
                 },
                 toilet_need: Some(50),
                 autonomous_intention: None,
-                player_task: Some(ClientPlayerTaskSnapshot {
-                    id: PlayerTaskId(29),
-                    state: ClientPlayerTaskState::Active,
-                }),
+                player_tasks: vec![
+                    ClientPlayerTaskSnapshot {
+                        id: PlayerTaskId(29),
+                        state: ClientPlayerTaskState::Active,
+                    },
+                    ClientPlayerTaskSnapshot {
+                        id: PlayerTaskId(31),
+                        state: ClientPlayerTaskState::Paused,
+                    },
+                ],
             }],
         };
 
         assert_eq!(
-            selected_task_to_cancel(Some(SimId(3)), &snapshot),
-            Some(PlayerTaskId(29))
+            cancellable_tasks(Some(SimId(3)), &snapshot),
+            vec![
+                CancelBinding {
+                    task: PlayerTaskId(29),
+                    outcome: CancellationOutcome::Active,
+                },
+                CancelBinding {
+                    task: PlayerTaskId(31),
+                    outcome: CancellationOutcome::Paused,
+                },
+            ]
         );
-        assert_eq!(selected_task_to_cancel(Some(SimId(4)), &snapshot), None);
-        assert_eq!(selected_task_to_cancel(None, &snapshot), None);
+        assert!(cancellable_tasks(Some(SimId(4)), &snapshot).is_empty());
+        assert!(cancellable_tasks(None, &snapshot).is_empty());
     }
 
     #[test]

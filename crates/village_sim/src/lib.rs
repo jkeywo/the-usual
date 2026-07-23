@@ -7,7 +7,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
     fs,
     path::Path,
 };
@@ -66,6 +66,15 @@ pub struct NeedDefinition {
     pub activate_at: u8,
     pub retain_above: u8,
     pub recovery: u8,
+    /// The value at or above which an autonomous need escalates to the Urgent
+    /// band and preempts the household's player task queue. It defaults high
+    /// so a need that omits it never escalates.
+    #[serde(default = "default_urgent_at")]
+    pub urgent_at: u8,
+}
+
+fn default_urgent_at() -> u8 {
+    u8::MAX
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -302,6 +311,55 @@ struct Resident {
 #[derive(Component, Debug)]
 struct Position(TilePosition);
 
+/// The arbitration band an action competes in. Bands change effective
+/// priority only; the deterministic tie-break (priority, request age, SimId)
+/// is unchanged. `Mandatory` is reserved for accident consequences and is not
+/// yet produced by any system.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionBand {
+    Autonomous,
+    Player,
+    Urgent,
+    // Reserved for accident consequences that interrupt everything; no system
+    // produces it yet.
+    #[allow(dead_code)]
+    Mandatory,
+}
+
+impl ActionBand {
+    /// The band's contribution to effective priority. Higher bands dominate
+    /// any fine priority difference within a lower band.
+    fn base(self) -> i32 {
+        match self {
+            Self::Autonomous => 0,
+            Self::Player => 1_000,
+            Self::Urgent => 2_000,
+            Self::Mandatory => 3_000,
+        }
+    }
+}
+
+/// One durable order held in a resident's player task queue. Only the queue
+/// head is dispatched into the execution engine at a time.
+#[derive(Clone, Debug)]
+struct QueuedPlayerTask {
+    task: PlayerTaskId,
+    order: QueuedOrder,
+}
+
+#[derive(Clone, Debug)]
+enum QueuedOrder {
+    GoTo {
+        destination: TilePosition,
+        priority: i32,
+    },
+    UseToilet {
+        object: DefinitionId,
+        affordance: DefinitionId,
+        priority: i32,
+    },
+}
+
 #[derive(Clone, Debug)]
 struct GoToState {
     destination: TilePosition,
@@ -309,7 +367,9 @@ struct GoToState {
     next_step: usize,
     traversal: Option<PortalTraversal>,
     priority: i32,
+    band: ActionBand,
     request_age: u64,
+    player_task: Option<PlayerTaskId>,
 }
 
 #[derive(Clone, Debug)]
@@ -325,6 +385,7 @@ struct UseRequest {
     object: DefinitionId,
     affordance: DefinitionId,
     priority: i32,
+    band: ActionBand,
     request_age: u64,
     player_task: Option<PlayerTaskId>,
 }
@@ -336,6 +397,7 @@ struct MovementClaim {
     resident: SimId,
     target: TilePosition,
     priority: i32,
+    band: ActionBand,
     request_age: u64,
 }
 
@@ -356,6 +418,7 @@ struct ToiletNeedState {
     activate_at: u8,
     retain_above: u8,
     recovery: u8,
+    urgent_at: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -415,22 +478,23 @@ pub enum PlayerCommandRejection {
 enum PlayerTaskState {
     Queued,
     Active,
+    /// Preempted by an urgent need; the order stays at its resident's queue
+    /// head and resumes once the need is satisfied.
+    Paused,
     Completed,
     Cancelled,
 }
 
 fn compare_use_requests(left: &UseRequest, right: &UseRequest) -> std::cmp::Ordering {
-    right
-        .priority
-        .cmp(&left.priority)
+    (right.band.base() + right.priority)
+        .cmp(&(left.band.base() + left.priority))
         .then_with(|| left.request_age.cmp(&right.request_age))
         .then_with(|| left.resident.cmp(&right.resident))
 }
 
 fn compare_movement_claims(left: &MovementClaim, right: &MovementClaim) -> std::cmp::Ordering {
-    right
-        .priority
-        .cmp(&left.priority)
+    (right.band.base() + right.priority)
+        .cmp(&(left.band.base() + left.priority))
         .then_with(|| left.request_age.cmp(&right.request_age))
         .then_with(|| left.resident.cmp(&right.resident))
 }
@@ -461,6 +525,11 @@ pub enum WorldEventKind {
         position: TilePosition,
     },
     GoToFailed {
+        resident: SimId,
+        destination: TilePosition,
+    },
+    GoToCancelled {
+        task: PlayerTaskId,
         resident: SimId,
         destination: TilePosition,
     },
@@ -531,8 +600,10 @@ pub struct Simulation {
     toilet_needs: BTreeMap<SimId, ToiletNeedState>,
     autonomous_toilet_plans: BTreeMap<SimId, ToiletPlan>,
     autonomous_toilet_intentions: BTreeSet<SimId>,
+    urgent_toilet_intentions: BTreeSet<SimId>,
     player_command_inbox: Vec<PlayerCommand>,
     player_tasks: BTreeMap<PlayerTaskId, PlayerTaskState>,
+    player_task_queue: BTreeMap<SimId, VecDeque<QueuedPlayerTask>>,
     object_slot_claims: BTreeMap<(DefinitionId, DefinitionId), SimId>,
     capability_claims: BTreeMap<(SimId, Capability), DefinitionId>,
     pending_events: Vec<WorldEvent>,
@@ -560,8 +631,9 @@ pub struct ClientResidentSnapshot {
     pub toilet_need: Option<u8>,
     /// The autonomous intention currently selected by the simulation.
     pub autonomous_intention: Option<ClientIntention>,
-    /// A currently queued or executing player task for this resident.
-    pub player_task: Option<ClientPlayerTaskSnapshot>,
+    /// The resident's ordered player task queue, head first. Each entry is
+    /// individually cancellable by its stable id.
+    pub player_tasks: Vec<ClientPlayerTaskSnapshot>,
 }
 
 /// Presentation-safe names for the narrow set of autonomous intentions.
@@ -581,6 +653,7 @@ pub struct ClientPlayerTaskSnapshot {
 pub enum ClientPlayerTaskState {
     Queued,
     Active,
+    Paused,
 }
 
 impl Simulation {
@@ -639,8 +712,10 @@ impl Simulation {
             toilet_needs: BTreeMap::new(),
             autonomous_toilet_plans: BTreeMap::new(),
             autonomous_toilet_intentions: BTreeSet::new(),
+            urgent_toilet_intentions: BTreeSet::new(),
             player_command_inbox: Vec::new(),
             player_tasks: BTreeMap::new(),
+            player_task_queue: BTreeMap::new(),
             object_slot_claims: BTreeMap::new(),
             capability_claims: BTreeMap::new(),
             pending_events: Vec::new(),
@@ -694,6 +769,7 @@ impl Simulation {
                         activate_at: need.activate_at,
                         retain_above: need.retain_above,
                         recovery: need.recovery,
+                        urgent_at: need.urgent_at,
                     },
                 );
                 simulation.autonomous_toilet_plans.insert(sim_id, plan);
@@ -783,7 +859,7 @@ impl Simulation {
                     .get::<Position>(*entity)
                     .expect("resident always has a position")
                     .0;
-                let player_task = self.client_player_task(*id);
+                let player_tasks = self.client_player_tasks(*id);
                 ClientResidentSnapshot {
                     id: *id,
                     definition_id: resident.definition_id.clone(),
@@ -793,7 +869,7 @@ impl Simulation {
                     autonomous_intention: self
                         .has_autonomous_toilet_intention(*id)
                         .then_some(ClientIntention::Toilet),
-                    player_task,
+                    player_tasks,
                 }
             })
             .collect();
@@ -805,36 +881,28 @@ impl Simulation {
         }
     }
 
-    fn client_player_task(&self, resident: SimId) -> Option<ClientPlayerTaskSnapshot> {
-        self.use_requests
+    /// Projects a resident's player task queue, head first, as presentation
+    /// state. The durable order is the queue itself; execution engine maps are
+    /// only consulted for each task's live Queued/Active/Paused state.
+    fn client_player_tasks(&self, resident: SimId) -> Vec<ClientPlayerTaskSnapshot> {
+        let Some(queue) = self.player_task_queue.get(&resident) else {
+            return Vec::new();
+        };
+        queue
             .iter()
-            .find_map(|request| {
-                (request.resident == resident)
-                    .then_some(request.player_task)
-                    .flatten()
-            })
-            .and_then(|id| {
-                self.player_tasks.get(&id).and_then(|state| {
-                    matches!(state, PlayerTaskState::Queued).then_some(ClientPlayerTaskSnapshot {
-                        id,
-                        state: ClientPlayerTaskState::Queued,
-                    })
+            .filter_map(|queued| {
+                let state = match self.player_tasks.get(&queued.task)? {
+                    PlayerTaskState::Queued => ClientPlayerTaskState::Queued,
+                    PlayerTaskState::Active => ClientPlayerTaskState::Active,
+                    PlayerTaskState::Paused => ClientPlayerTaskState::Paused,
+                    PlayerTaskState::Completed | PlayerTaskState::Cancelled => return None,
+                };
+                Some(ClientPlayerTaskSnapshot {
+                    id: queued.task,
+                    state,
                 })
             })
-            .or_else(|| {
-                self.active_object_uses.get(&resident).and_then(|active| {
-                    active.player_task.and_then(|id| {
-                        self.player_tasks.get(&id).and_then(|state| {
-                            matches!(state, PlayerTaskState::Active).then_some(
-                                ClientPlayerTaskSnapshot {
-                                    id,
-                                    state: ClientPlayerTaskState::Active,
-                                },
-                            )
-                        })
-                    })
-                })
-            })
+            .collect()
     }
 
     /// Starts a narrow navigation task. It plans immediately but claims no
@@ -852,6 +920,17 @@ impl Simulation {
         destination: TilePosition,
         priority: i32,
     ) -> bool {
+        self.begin_go_to_banded(resident, destination, priority, ActionBand::Player, None)
+    }
+
+    fn begin_go_to_banded(
+        &mut self,
+        resident: SimId,
+        destination: TilePosition,
+        priority: i32,
+        band: ActionBand,
+        player_task: Option<PlayerTaskId>,
+    ) -> bool {
         let Some(origin) = self.resident_position(resident) else {
             return false;
         };
@@ -864,7 +943,9 @@ impl Simulation {
                 next_step: 1,
                 traversal: None,
                 priority,
+                band,
                 request_age: self.tick,
+                player_task,
             },
         );
         true
@@ -879,6 +960,25 @@ impl Simulation {
         object: &DefinitionId,
         affordance: &DefinitionId,
         priority: i32,
+    ) -> bool {
+        self.begin_use_object_banded(
+            resident,
+            object,
+            affordance,
+            priority,
+            ActionBand::Player,
+            None,
+        )
+    }
+
+    fn begin_use_object_banded(
+        &mut self,
+        resident: SimId,
+        object: &DefinitionId,
+        affordance: &DefinitionId,
+        priority: i32,
+        band: ActionBand,
+        player_task: Option<PlayerTaskId>,
     ) -> bool {
         if !self.residents.contains_key(&resident)
             || self.active_object_uses.contains_key(&resident)
@@ -904,8 +1004,9 @@ impl Simulation {
             object: object.clone(),
             affordance: affordance.clone(),
             priority,
+            band,
             request_age: self.tick,
-            player_task: None,
+            player_task,
         });
         true
     }
@@ -969,6 +1070,7 @@ impl Simulation {
         self.ingest_player_commands();
         self.update_toilet_needs();
         self.choose_autonomous_toilet_plans();
+        self.dispatch_player_queues();
         self.tick_go_to();
         self.tick_object_uses();
 
@@ -995,58 +1097,269 @@ impl Simulation {
                 .toilet_needs
                 .get(&resident)
                 .expect("resident was collected from toilet needs");
+            let (value, activate_at, retain_above, urgent_at) = (
+                need.value,
+                need.activate_at,
+                need.retain_above,
+                need.urgent_at,
+            );
+
             let selected = self.autonomous_toilet_intentions.contains(&resident);
-            if selected && need.value <= need.retain_above {
+            if selected && value <= retain_above {
                 self.autonomous_toilet_intentions.remove(&resident);
+                self.urgent_toilet_intentions.remove(&resident);
                 continue;
             }
-            if !selected && need.value < need.activate_at {
+            if !selected && value < activate_at {
                 continue;
             }
             self.autonomous_toilet_intentions.insert(resident);
 
-            // Player work owns the resident's next action. An autonomous
-            // intention remains selected but deliberately does not compete.
-            if self.resident_has_player_work(resident)
-                || self.active_object_uses.contains_key(&resident)
-                || self
-                    .use_requests
-                    .iter()
-                    .any(|request| request.resident == resident)
-            {
-                continue;
+            // Escalate to, or relax from, the Urgent band using the same
+            // hysteresis the intention itself uses to remain selected.
+            if value >= urgent_at {
+                self.urgent_toilet_intentions.insert(resident);
+            } else if value <= retain_above {
+                self.urgent_toilet_intentions.remove(&resident);
             }
+            let urgent = self.urgent_toilet_intentions.contains(&resident);
+
             let plan = self
                 .autonomous_toilet_plans
                 .get(&resident)
                 .expect("every toilet need has a resolved conduct plan")
                 .clone();
-            let destination = self
-                .objects
-                .get(&plan.object)
-                .expect("resolved toilet plan names a loaded object")
-                .position;
-            // A need intention is a physical plan: first reach the object,
-            // then enter the ordinary claim/use path. Object use itself stays
-            // claim-based, but no longer happens from across the cottage.
-            if self.resident_position(resident) != Some(destination) {
-                if !self.go_to.contains_key(&resident) {
-                    let _ = self.begin_go_to_with_priority(resident, destination, plan.priority);
+
+            if urgent {
+                // Urgent overrides the player queue: pause whatever player order
+                // holds the resident's slot (unless it is already the toilet),
+                // then drive the toilet plan in the Urgent band. The paused
+                // order stays at its queue head and resumes on recovery.
+                if !self.resident_engaged_with_toilet(resident, &plan) {
+                    self.pause_player_head_for_urgent(resident);
                 }
+                self.drive_toilet_plan(resident, &plan, ActionBand::Urgent);
                 continue;
             }
-            let _ = self.begin_use_object(resident, &plan.object, &plan.affordance, plan.priority);
+
+            // Non-urgent autonomy never preempts: it yields entirely to any
+            // player queue, and to work already in flight for the resident.
+            if self.resident_has_player_queue(resident)
+                || !self.resident_execution_slot_free(resident)
+            {
+                continue;
+            }
+            self.drive_toilet_plan(resident, &plan, ActionBand::Autonomous);
         }
     }
 
-    fn resident_has_player_work(&self, resident: SimId) -> bool {
-        self.use_requests
+    /// Drives the two-phase toilet plan in a given band: first physically
+    /// reach the object tile, then enter the ordinary claim/use path.
+    fn drive_toilet_plan(&mut self, resident: SimId, plan: &ToiletPlan, band: ActionBand) {
+        let destination = self
+            .objects
+            .get(&plan.object)
+            .expect("resolved toilet plan names a loaded object")
+            .position;
+        if self.resident_position(resident) != Some(destination) {
+            if !self.go_to.contains_key(&resident) {
+                let _ = self.begin_go_to_banded(resident, destination, plan.priority, band, None);
+            }
+            return;
+        }
+        if self.active_object_uses.contains_key(&resident)
+            || self
+                .use_requests
+                .iter()
+                .any(|request| request.resident == resident)
+        {
+            return;
+        }
+        let _ = self.begin_use_object_banded(
+            resident,
+            &plan.object,
+            &plan.affordance,
+            plan.priority,
+            band,
+            None,
+        );
+    }
+
+    /// Whether the resident is already physically engaged with the toilet plan
+    /// — walking to it, requesting it, or actively using it — so an urgent
+    /// need need not preempt anything.
+    fn resident_engaged_with_toilet(&self, resident: SimId, plan: &ToiletPlan) -> bool {
+        let toilet_position = self.objects.get(&plan.object).map(|object| object.position);
+        if let Some(state) = self.go_to.get(&resident)
+            && Some(state.destination) == toilet_position
+        {
+            return true;
+        }
+        if let Some(active) = self.active_object_uses.get(&resident)
+            && active.object == plan.object
+            && active.affordance == plan.affordance
+        {
+            return true;
+        }
+        self.use_requests.iter().any(|request| {
+            request.resident == resident
+                && request.object == plan.object
+                && request.affordance == plan.affordance
+        })
+    }
+
+    /// Releases whatever dispatched player order holds the resident's execution
+    /// slot at its safe boundary and marks it Paused, leaving it at the queue
+    /// head to resume once the urgent need is satisfied.
+    fn pause_player_head_for_urgent(&mut self, resident: SimId) {
+        if let Some(task) = self
+            .go_to
+            .get(&resident)
+            .and_then(|state| state.player_task)
+        {
+            self.go_to.remove(&resident);
+            self.player_tasks.insert(task, PlayerTaskState::Paused);
+            return;
+        }
+        if let Some(task) = self
+            .active_object_uses
+            .get(&resident)
+            .and_then(|active| active.player_task)
+        {
+            let active = self
+                .active_object_uses
+                .remove(&resident)
+                .expect("active object use was just observed");
+            self.object_slot_claims
+                .remove(&(active.object.clone(), active.slot.clone()));
+            self.capability_claims
+                .remove(&(resident, active.capability));
+            self.player_tasks.insert(task, PlayerTaskState::Paused);
+            return;
+        }
+        if let Some(index) = self
+            .use_requests
             .iter()
-            .any(|request| request.resident == resident && request.player_task.is_some())
+            .position(|request| request.resident == resident && request.player_task.is_some())
+        {
+            let request = self.use_requests.remove(index);
+            if let Some(task) = request.player_task {
+                self.player_tasks.insert(task, PlayerTaskState::Paused);
+            }
+        }
+    }
+
+    fn resident_has_player_queue(&self, resident: SimId) -> bool {
+        self.player_task_queue
+            .get(&resident)
+            .is_some_and(|queue| !queue.is_empty())
+    }
+
+    fn resident_execution_slot_free(&self, resident: SimId) -> bool {
+        !self.go_to.contains_key(&resident)
+            && !self.active_object_uses.contains_key(&resident)
+            && !self
+                .use_requests
+                .iter()
+                .any(|request| request.resident == resident)
+    }
+
+    fn is_task_dispatched(&self, resident: SimId, task: PlayerTaskId) -> bool {
+        self.go_to
+            .get(&resident)
+            .and_then(|state| state.player_task)
+            == Some(task)
             || self
                 .active_object_uses
                 .get(&resident)
-                .is_some_and(|active| active.player_task.is_some())
+                .and_then(|active| active.player_task)
+                == Some(task)
+            || self
+                .use_requests
+                .iter()
+                .any(|request| request.player_task == Some(task))
+    }
+
+    /// Dispatches the head of each resident's player queue into the execution
+    /// engine when the resident is free and not owned by an urgent need. Only
+    /// one player task per resident executes at a time.
+    fn dispatch_player_queues(&mut self) {
+        let residents = self.player_task_queue.keys().copied().collect::<Vec<_>>();
+        for resident in residents {
+            if self.urgent_toilet_intentions.contains(&resident) {
+                continue;
+            }
+            let Some(head) = self
+                .player_task_queue
+                .get(&resident)
+                .and_then(|queue| queue.front())
+                .cloned()
+            else {
+                continue;
+            };
+            if self.is_task_dispatched(resident, head.task)
+                || !self.resident_execution_slot_free(resident)
+            {
+                continue;
+            }
+            match head.order {
+                QueuedOrder::GoTo {
+                    destination,
+                    priority,
+                } => {
+                    if self.begin_go_to_banded(
+                        resident,
+                        destination,
+                        priority,
+                        ActionBand::Player,
+                        Some(head.task),
+                    ) {
+                        self.player_tasks.insert(head.task, PlayerTaskState::Active);
+                    }
+                }
+                QueuedOrder::UseToilet {
+                    object,
+                    affordance,
+                    priority,
+                } => {
+                    if self.begin_use_object_banded(
+                        resident,
+                        &object,
+                        &affordance,
+                        priority,
+                        ActionBand::Player,
+                        Some(head.task),
+                    ) {
+                        self.player_tasks.insert(head.task, PlayerTaskState::Queued);
+                    }
+                }
+            }
+        }
+    }
+
+    fn locate_queued_task(&self, task: PlayerTaskId) -> Option<(SimId, QueuedOrder)> {
+        self.player_task_queue.iter().find_map(|(resident, queue)| {
+            queue
+                .iter()
+                .find(|queued| queued.task == task)
+                .map(|queued| (*resident, queued.order.clone()))
+        })
+    }
+
+    fn remove_task_from_queue(&mut self, resident: SimId, task: PlayerTaskId) {
+        if let Some(queue) = self.player_task_queue.get_mut(&resident) {
+            queue.retain(|queued| queued.task != task);
+            if queue.is_empty() {
+                self.player_task_queue.remove(&resident);
+            }
+        }
+    }
+
+    /// Records a player task's terminal state and drops it from its resident's
+    /// queue so the next queued order can dispatch.
+    fn finish_player_task(&mut self, resident: SimId, task: PlayerTaskId, state: PlayerTaskState) {
+        self.player_tasks.insert(task, state);
+        self.remove_task_from_queue(resident, task);
     }
 
     fn ingest_player_commands(&mut self) {
@@ -1092,21 +1405,27 @@ impl Simulation {
             });
             return;
         }
-        if !self.is_walkable(destination) || self.go_to.contains_key(&resident) {
+        if !self.is_walkable(destination) {
             self.emit(WorldEventKind::PlayerCommandRejected {
                 task,
                 reason: PlayerCommandRejection::InvalidMoveTarget,
             });
             return;
         }
-        if self.begin_go_to_with_priority(resident, destination, priority) {
-            self.emit(WorldEventKind::PlayerCommandAccepted { task });
-        } else {
-            self.emit(WorldEventKind::PlayerCommandRejected {
+        // A second order no longer conflicts: it joins the resident's queue and
+        // dispatches once earlier orders finish or are cancelled.
+        self.player_tasks.insert(task, PlayerTaskState::Queued);
+        self.player_task_queue
+            .entry(resident)
+            .or_default()
+            .push_back(QueuedPlayerTask {
                 task,
-                reason: PlayerCommandRejection::InvalidMoveTarget,
+                order: QueuedOrder::GoTo {
+                    destination,
+                    priority,
+                },
             });
-        }
+        self.emit(WorldEventKind::PlayerCommandAccepted { task });
     }
 
     fn ingest_queue_use_toilet(
@@ -1131,23 +1450,6 @@ impl Simulation {
             });
             return;
         }
-        // A queued autonomous request yields to the household's explicit
-        // order before either has claimed a slot. Active primitives remain
-        // safely non-preemptible and therefore report ResidentBusy.
-        self.use_requests
-            .retain(|request| request.resident != resident || request.player_task.is_some());
-        if self.active_object_uses.contains_key(&resident)
-            || self
-                .use_requests
-                .iter()
-                .any(|request| request.resident == resident)
-        {
-            self.emit(WorldEventKind::PlayerCommandRejected {
-                task,
-                reason: PlayerCommandRejection::ResidentBusy,
-            });
-            return;
-        }
         // This command represents one semantic household order, rather than
         // a generic "use any affordance" escape hatch. It must therefore use
         // the resident's conduct-resolved toilet plan exactly.
@@ -1163,15 +1465,22 @@ impl Simulation {
             return;
         }
 
+        // Player orders own the resident's next action, so a competing
+        // autonomous request is naturally suppressed by band and by the
+        // non-urgent yield in `choose_autonomous_toilet_plans`; a busy resident
+        // simply queues the order behind its current work.
         self.player_tasks.insert(task, PlayerTaskState::Queued);
-        self.use_requests.push(UseRequest {
-            resident,
-            object,
-            affordance,
-            priority,
-            request_age: self.tick,
-            player_task: Some(task),
-        });
+        self.player_task_queue
+            .entry(resident)
+            .or_default()
+            .push_back(QueuedPlayerTask {
+                task,
+                order: QueuedOrder::UseToilet {
+                    object,
+                    affordance,
+                    priority,
+                },
+            });
         self.emit(WorldEventKind::PlayerCommandAccepted { task });
     }
 
@@ -1183,50 +1492,111 @@ impl Simulation {
             });
             return;
         };
-        if !matches!(state, PlayerTaskState::Queued | PlayerTaskState::Active) {
+        if !matches!(
+            state,
+            PlayerTaskState::Queued | PlayerTaskState::Active | PlayerTaskState::Paused
+        ) {
             self.emit(WorldEventKind::PlayerCommandRejected {
                 task,
                 reason: PlayerCommandRejection::TaskNotCancellable,
             });
             return;
         }
+        let Some((resident, order)) = self.locate_queued_task(task) else {
+            // A live task is always in exactly one resident's queue.
+            self.emit(WorldEventKind::PlayerCommandRejected {
+                task,
+                reason: PlayerCommandRejection::UnknownTask,
+            });
+            return;
+        };
 
         self.emit(WorldEventKind::PlayerCommandAccepted { task });
-        if state == PlayerTaskState::Queued {
-            let request = self
-                .use_requests
-                .iter()
-                .position(|request| request.player_task == Some(task))
-                .map(|index| self.use_requests.remove(index))
-                .expect("queued player task always has a use request");
-            self.player_tasks.insert(task, PlayerTaskState::Cancelled);
+
+        // Dispatched as the resident's active movement.
+        if self
+            .go_to
+            .get(&resident)
+            .and_then(|state| state.player_task)
+            == Some(task)
+        {
+            let destination = self
+                .go_to
+                .get(&resident)
+                .map(|state| state.destination)
+                .expect("dispatched go-to was just observed");
+            self.go_to.remove(&resident);
+            self.finish_player_task(resident, task, PlayerTaskState::Cancelled);
+            self.emit(WorldEventKind::GoToCancelled {
+                task,
+                resident,
+                destination,
+            });
+            return;
+        }
+        // Dispatched as an active object use: release at the safe boundary.
+        if self
+            .active_object_uses
+            .get(&resident)
+            .and_then(|active| active.player_task)
+            == Some(task)
+        {
+            let active = self
+                .active_object_uses
+                .remove(&resident)
+                .expect("active object use was just observed");
+            self.object_slot_claims
+                .remove(&(active.object.clone(), active.slot.clone()));
+            self.capability_claims
+                .remove(&(resident, active.capability));
+            self.finish_player_task(resident, task, PlayerTaskState::Cancelled);
             self.emit(WorldEventKind::TaskCancelled {
                 task,
-                resident: request.resident,
+                resident,
+                object: active.object,
+                affordance: active.affordance,
+            });
+            return;
+        }
+        // Dispatched as a not-yet-claimed use request.
+        if let Some(index) = self
+            .use_requests
+            .iter()
+            .position(|request| request.player_task == Some(task))
+        {
+            let request = self.use_requests.remove(index);
+            self.finish_player_task(resident, task, PlayerTaskState::Cancelled);
+            self.emit(WorldEventKind::TaskCancelled {
+                task,
+                resident,
                 object: request.object,
                 affordance: request.affordance,
             });
             return;
         }
 
-        let (resident, active) = self
-            .active_object_uses
-            .iter()
-            .find(|(_, active)| active.player_task == Some(task))
-            .map(|(resident, active)| (*resident, active.clone()))
-            .expect("active player task always has an active object use");
-        self.active_object_uses.remove(&resident);
-        self.object_slot_claims
-            .remove(&(active.object.clone(), active.slot.clone()));
-        self.capability_claims
-            .remove(&(resident, active.capability));
-        self.player_tasks.insert(task, PlayerTaskState::Cancelled);
-        self.emit(WorldEventKind::TaskCancelled {
-            task,
-            resident,
-            object: active.object,
-            affordance: active.affordance,
-        });
+        // Not dispatched: a tail-queued or urgent-paused order. Remove it in
+        // place; its resident keeps its remaining queue.
+        self.finish_player_task(resident, task, PlayerTaskState::Cancelled);
+        match order {
+            QueuedOrder::GoTo { destination, .. } => {
+                self.emit(WorldEventKind::GoToCancelled {
+                    task,
+                    resident,
+                    destination,
+                });
+            }
+            QueuedOrder::UseToilet {
+                object, affordance, ..
+            } => {
+                self.emit(WorldEventKind::TaskCancelled {
+                    task,
+                    resident,
+                    object,
+                    affordance,
+                });
+            }
+        }
     }
 
     fn tick_go_to(&mut self) {
@@ -1250,6 +1620,7 @@ impl Simulation {
                     resident: *resident,
                     target,
                     priority: state.priority,
+                    band: state.band,
                     request_age: state.request_age,
                 })
             })
@@ -1312,7 +1683,7 @@ impl Simulation {
                 self.capability_claims
                     .remove(&(resident, active.capability));
                 if let Some(task) = active.player_task {
-                    self.player_tasks.insert(task, PlayerTaskState::Completed);
+                    self.finish_player_task(resident, task, PlayerTaskState::Completed);
                 }
                 self.emit(WorldEventKind::ObjectUseCompleted {
                     resident,
@@ -1427,6 +1798,9 @@ impl Simulation {
         }
 
         if state.path.is_empty() {
+            if let Some(task) = state.player_task {
+                self.finish_player_task(resident, task, PlayerTaskState::Completed);
+            }
             self.emit(WorldEventKind::GoToFailed {
                 resident,
                 destination: state.destination,
@@ -1434,6 +1808,9 @@ impl Simulation {
             return;
         }
         if origin == state.destination {
+            if let Some(task) = state.player_task {
+                self.finish_player_task(resident, task, PlayerTaskState::Completed);
+            }
             self.emit(WorldEventKind::GoToArrived {
                 resident,
                 destination: state.destination,
@@ -1442,6 +1819,9 @@ impl Simulation {
         }
 
         let Some(next) = state.path.get(state.next_step).copied() else {
+            if let Some(task) = state.player_task {
+                self.finish_player_task(resident, task, PlayerTaskState::Completed);
+            }
             self.emit(WorldEventKind::GoToFailed {
                 resident,
                 destination: state.destination,
@@ -1496,6 +1876,9 @@ impl Simulation {
 
     fn finish_or_continue_go_to(&mut self, resident: SimId, state: GoToState) {
         if self.resident_position(resident) == Some(state.destination) {
+            if let Some(task) = state.player_task {
+                self.finish_player_task(resident, task, PlayerTaskState::Completed);
+            }
             self.emit(WorldEventKind::GoToArrived {
                 resident,
                 destination: state.destination,
@@ -2237,6 +2620,7 @@ mod tests {
             object: toilet.clone(),
             affordance: affordance.clone(),
             priority,
+            band: ActionBand::Player,
             request_age,
             player_task: None,
         };
@@ -2519,7 +2903,7 @@ mod tests {
         let resident = &simulation.cottage_snapshot().residents[0];
         assert_eq!(resident.toilet_need, Some(51));
         assert_eq!(resident.autonomous_intention, Some(ClientIntention::Toilet));
-        assert_eq!(resident.player_task, None);
+        assert!(resident.player_tasks.is_empty());
 
         let mut simulation = load_simulation();
         let task = PlayerTaskId(47);
@@ -2534,11 +2918,11 @@ mod tests {
 
         let resident = &simulation.cottage_snapshot().residents[0];
         assert_eq!(
-            resident.player_task,
-            Some(ClientPlayerTaskSnapshot {
+            resident.player_tasks,
+            vec![ClientPlayerTaskSnapshot {
                 id: task,
                 state: ClientPlayerTaskState::Active,
-            })
+            }]
         );
     }
 
@@ -2843,5 +3227,333 @@ mod tests {
         let first = run_cottage_contention_script();
         let second = run_cottage_contention_script();
         assert_eq!(first, second, "the full scripted fixture is repeatable");
+    }
+
+    fn resident_player_tasks(
+        simulation: &Simulation,
+        resident: SimId,
+    ) -> Vec<ClientPlayerTaskSnapshot> {
+        simulation
+            .cottage_snapshot()
+            .residents
+            .into_iter()
+            .find(|candidate| candidate.id == resident)
+            .expect("resident is present in the snapshot")
+            .player_tasks
+    }
+
+    #[test]
+    fn two_queued_player_orders_execute_in_fifo_order() {
+        let mut simulation = load_simulation();
+        let resident = SimId(1);
+        let first = PlayerTaskId(101);
+        let second = PlayerTaskId(102);
+        let far = TilePosition {
+            floor: 0,
+            x: 4,
+            y: 1,
+        };
+        let home = TilePosition {
+            floor: 0,
+            x: 1,
+            y: 1,
+        };
+        simulation.submit_player_command(PlayerCommand::QueueGoTo {
+            task: first,
+            resident,
+            destination: far,
+            priority: 0,
+        });
+        simulation.submit_player_command(PlayerCommand::QueueGoTo {
+            task: second,
+            resident,
+            destination: home,
+            priority: 0,
+        });
+
+        // Only the head executes; the rest of the list stays queued.
+        simulation.advance_tick();
+        assert_eq!(
+            resident_player_tasks(&simulation, resident),
+            vec![
+                ClientPlayerTaskSnapshot {
+                    id: first,
+                    state: ClientPlayerTaskState::Active,
+                },
+                ClientPlayerTaskSnapshot {
+                    id: second,
+                    state: ClientPlayerTaskState::Queued,
+                },
+            ]
+        );
+
+        for _ in 0..16 {
+            simulation.advance_tick();
+        }
+        assert_eq!(simulation.resident_position(resident), Some(home));
+        assert!(resident_player_tasks(&simulation, resident).is_empty());
+
+        // The head arrival is published strictly before the second order's.
+        let arrivals = simulation
+            .event_ledger()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                WorldEventKind::GoToArrived {
+                    resident: arrived,
+                    destination,
+                } if *arrived == resident => Some(*destination),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(arrivals, vec![far, home]);
+    }
+
+    #[test]
+    fn a_non_head_queued_task_cancels_without_disturbing_the_head() {
+        let mut simulation = load_simulation();
+        let resident = SimId(1);
+        let first = PlayerTaskId(111);
+        let second = PlayerTaskId(112);
+        let far = TilePosition {
+            floor: 0,
+            x: 4,
+            y: 1,
+        };
+        let home = TilePosition {
+            floor: 0,
+            x: 1,
+            y: 1,
+        };
+        simulation.submit_player_command(PlayerCommand::QueueGoTo {
+            task: first,
+            resident,
+            destination: far,
+            priority: 0,
+        });
+        simulation.submit_player_command(PlayerCommand::QueueGoTo {
+            task: second,
+            resident,
+            destination: home,
+            priority: 0,
+        });
+        simulation.advance_tick();
+
+        simulation.submit_player_command(PlayerCommand::CancelPlayerTask { task: second });
+        simulation.advance_tick();
+
+        // The second order is gone; the head continues to its destination.
+        assert_eq!(
+            resident_player_tasks(&simulation, resident),
+            vec![ClientPlayerTaskSnapshot {
+                id: first,
+                state: ClientPlayerTaskState::Active,
+            }]
+        );
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::GoToCancelled {
+                    task: second,
+                    resident,
+                    destination: home,
+                }
+        }));
+
+        for _ in 0..12 {
+            simulation.advance_tick();
+        }
+        assert_eq!(simulation.resident_position(resident), Some(far));
+        assert!(resident_player_tasks(&simulation, resident).is_empty());
+        // The cancelled order never ran.
+        assert!(!simulation.event_ledger().iter().any(|event| {
+            matches!(
+                event.kind,
+                WorldEventKind::GoToArrived {
+                    resident: r,
+                    destination,
+                } if r == resident && destination == home
+            )
+        }));
+    }
+
+    #[test]
+    fn cancelling_the_active_head_dispatches_the_next_queued_task() {
+        let mut simulation = load_simulation();
+        let (toilet, affordance, slot) = toilet_ids();
+        let resident = SimId(1);
+        let use_task = PlayerTaskId(121);
+        let move_task = PlayerTaskId(122);
+        let far = TilePosition {
+            floor: 0,
+            x: 4,
+            y: 1,
+        };
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task: use_task,
+            resident,
+            object: toilet.clone(),
+            affordance: affordance.clone(),
+            priority: 0,
+        });
+        simulation.submit_player_command(PlayerCommand::QueueGoTo {
+            task: move_task,
+            resident,
+            destination: far,
+            priority: 0,
+        });
+        simulation.advance_tick();
+        assert_eq!(
+            simulation.object_slot_claimant(&toilet, &slot),
+            Some(resident)
+        );
+
+        simulation.submit_player_command(PlayerCommand::CancelPlayerTask { task: use_task });
+        simulation.advance_tick();
+
+        // The active use released and the queued move took over.
+        assert_eq!(simulation.object_slot_claimant(&toilet, &slot), None);
+        assert!(simulation.event_ledger().iter().any(|event| {
+            matches!(
+                &event.kind,
+                WorldEventKind::TaskCancelled { task, .. } if *task == use_task
+            )
+        }));
+        assert_eq!(
+            resident_player_tasks(&simulation, resident),
+            vec![ClientPlayerTaskSnapshot {
+                id: move_task,
+                state: ClientPlayerTaskState::Active,
+            }]
+        );
+    }
+
+    #[test]
+    fn urgent_need_preempts_a_player_move_then_resumes_it() {
+        let mut simulation = load_simulation();
+        let (toilet, _, _) = toilet_ids();
+        let resident = SimId(1);
+        let move_task = PlayerTaskId(131);
+        let far = TilePosition {
+            floor: 0,
+            x: 4,
+            y: 1,
+        };
+        simulation.submit_player_command(PlayerCommand::QueueGoTo {
+            task: move_task,
+            resident,
+            destination: far,
+            priority: 0,
+        });
+        simulation.advance_tick();
+        assert_eq!(
+            simulation.resident_position(resident),
+            Some(TilePosition {
+                floor: 0,
+                x: 2,
+                y: 1,
+            })
+        );
+
+        // Push the toilet need over its urgent threshold (authored 80).
+        assert!(simulation.set_toilet_need(resident, 85));
+        simulation.advance_tick();
+
+        // The player move is paused, not cancelled, and the urgent walk to the
+        // toilet has taken over.
+        assert_eq!(
+            resident_player_tasks(&simulation, resident),
+            vec![ClientPlayerTaskSnapshot {
+                id: move_task,
+                state: ClientPlayerTaskState::Paused,
+            }]
+        );
+        assert_eq!(
+            simulation.resident_position(resident),
+            Some(TilePosition {
+                floor: 0,
+                x: 3,
+                y: 1,
+            })
+        );
+
+        for _ in 0..12 {
+            simulation.advance_tick();
+        }
+
+        // The urgent need was served and the paused move resumed to completion.
+        assert_eq!(simulation.resident_position(resident), Some(far));
+        assert!(resident_player_tasks(&simulation, resident).is_empty());
+        assert!(simulation.event_ledger().iter().any(|event| {
+            matches!(
+                &event.kind,
+                WorldEventKind::ObjectUseStarted { resident: r, object, .. }
+                    if *r == resident && *object == toilet
+            )
+        }));
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::GoToArrived {
+                    resident,
+                    destination: far,
+                }
+        }));
+        // A paused order is never reported as cancelled.
+        assert!(!simulation.event_ledger().iter().any(|event| {
+            matches!(
+                &event.kind,
+                WorldEventKind::GoToCancelled { task, .. } if *task == move_task
+            )
+        }));
+    }
+
+    fn run_queue_and_preemption_script() -> Vec<WorldEvent> {
+        let mut simulation = load_simulation();
+        let (toilet, affordance, _) = toilet_ids();
+        let resident = SimId(1);
+        let far = TilePosition {
+            floor: 0,
+            x: 4,
+            y: 1,
+        };
+        let home = TilePosition {
+            floor: 0,
+            x: 1,
+            y: 1,
+        };
+        simulation.submit_player_command(PlayerCommand::QueueGoTo {
+            task: PlayerTaskId(201),
+            resident,
+            destination: far,
+            priority: 0,
+        });
+        simulation.submit_player_command(PlayerCommand::QueueUseToilet {
+            task: PlayerTaskId(202),
+            resident,
+            object: toilet,
+            affordance,
+            priority: 0,
+        });
+        simulation.submit_player_command(PlayerCommand::QueueGoTo {
+            task: PlayerTaskId(203),
+            resident,
+            destination: home,
+            priority: 0,
+        });
+        simulation.advance_tick();
+
+        assert!(simulation.set_toilet_need(resident, 90));
+        simulation.submit_player_command(PlayerCommand::CancelPlayerTask {
+            task: PlayerTaskId(203),
+        });
+        for _ in 0..24 {
+            simulation.advance_tick();
+        }
+        simulation.event_ledger().to_vec()
+    }
+
+    #[test]
+    fn queue_and_preemption_script_is_deterministic() {
+        let first = run_queue_and_preemption_script();
+        let second = run_queue_and_preemption_script();
+        assert_eq!(first, second, "queue and preemption remain repeatable");
     }
 }

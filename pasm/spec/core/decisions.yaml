@@ -96,6 +96,14 @@ entities:
       summary: Cancellation is requested for the next tick. A primitive completes its smallest safe boundary, releases claims, reports Cancelled, and lets its plan handle the result.
       references: [agent-autonomy, capability-arbitration]
 
+  - decision: action-priority-bands
+    core:
+      status: accepted
+      confidence: confirmed
+      title: Autonomous, Player, Urgent, and Mandatory Priority Bands
+      summary: Actions compete in ordered priority bands Autonomous < Player < Urgent < Mandatory. A band contributes to effective priority only; the deterministic tie-break of priority, request age, then SimId is unchanged. Player orders outrank autonomous needs, so a household queue owns a resident until it drains. A need that crosses its authored urgent threshold escalates to the Urgent band and preempts the resident's queue head, which pauses at its next safe boundary and resumes once the need is satisfied rather than being cancelled. Mandatory, reserved for accident consequences that interrupt everything, is modelled later.
+      references: [safe-boundary-cancellation, deterministic-claim-arbitration, agent-autonomy, player-command-boundary]
+
   - decision: data-first-content-pipeline
     core:
       status: accepted
