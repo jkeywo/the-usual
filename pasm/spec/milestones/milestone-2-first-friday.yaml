@@ -28,13 +28,13 @@ entities:
       status: proposed
       confidence: confirmed
       title: Participant and Witness Consequences
-      summary: At least one pub interaction emits a world event with distinct participant and witness perceptions and a visible household knowledge result.
-      references: [world-events, social-consequences]
+      summary: Taking Mr Pargeter's corner seat while the pub is open emits a PargeterSeatTaken world event and forms distinct perceptions — the participant sat in the seat, each co-present witness tutted — and establishes the visible household knowledge that the seat is his. This is the deliberately narrow first cut of the wider social-consequences model; memories, relationship ledgers, and beliefs remain later work.
+      references: [world-events, social-consequences, world-time]
 
   - component: pub-seat-lore
     core:
       status: proposed
       confidence: confirmed
       title: The Pargeter Seat
-      summary: Sitting in the left-hand corner seat while the pub is open may provoke a tut and later a friendly warning that Mr Pargeter received the news about the pig there. It has no supernatural or need effect and requires no further explanation in this slice.
-      references: [setting-direction, initial-social-consequences]
+      summary: The left-hand corner seat is an authored smart object in the King's Head. Sitting there while the pub is open provokes a witness tut and the friendly household lore that Mr Pargeter received the news about the pig there. It has no supernatural or need effect; the client narrates it in the event feed and status card.
+      references: [setting-direction, initial-social-consequences, smart-objects]

@@ -30,5 +30,21 @@
                 ),
             ],
         ),
+        // The left-hand corner seat. Sitting here while the pub is open is
+        // socially loaded: it is understood to be Mr Pargeter's.
+        (
+            id: "object.pargeter_seat",
+            object_type: "object_type.seat",
+            position: (floor: 0, x: 22, y: 20),
+            slots: [(id: "slot.seat")],
+            affordances: [
+                (
+                    id: "affordance.take_seat",
+                    slot: "slot.seat",
+                    capability: Hands,
+                    duration_ticks: 3,
+                ),
+            ],
+        ),
     ],
 )

@@ -5,9 +5,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 use bevy::prelude::*;
 use bevy::{asset::AssetPlugin, input::mouse::MouseWheel};
 use village_sim::{
-    ClientIntention, ClientPlayerTaskState, CottageSnapshot, DefinitionId, PlayerCommand,
-    PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId, Simulation, TilePosition,
-    TimeOfDay, WorldEvent, WorldEventKind,
+    ClientIntention, ClientPerception, ClientPlayerTaskState, CottageSnapshot, DefinitionId,
+    PlayerCommand, PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId, Simulation,
+    TilePosition, TimeOfDay, WorldEvent, WorldEventKind,
 };
 
 /// The authored cottage remains a 32px grid. Residents and furniture use a
@@ -953,6 +953,19 @@ fn semantic_event_label(
             "A neighbour invited the household to the {} quiz.",
             format_clock(*event_at)
         )),
+        WorldEventKind::PargeterSeatTaken {
+            participant,
+            witnessed_by,
+        } => {
+            let reaction = witnessed_by.first().map_or_else(
+                || String::from("No one seems to have noticed."),
+                |witness| format!("{} tuts.", resident_name(*witness)),
+            );
+            Some(format!(
+                "{} took Mr Pargeter's corner seat. {reaction} The household now know it is his.",
+                resident_name(*participant)
+            ))
+        }
         _ => None,
     }
 }
@@ -1351,12 +1364,19 @@ fn update_status_card(
 }
 
 fn selected_status_text(selected: Option<SimId>, snapshot: &CottageSnapshot) -> String {
-    selected
+    let base = selected
         .and_then(|id| snapshot.residents.iter().find(|resident| resident.id == id))
         .map_or_else(
             || "Select a newcomer to inspect them.".to_owned(),
             resident_status_text,
+        );
+    if snapshot.household_knows_pargeter_custom {
+        format!(
+            "{base}\n\nThe household learned: the corner seat is Mr Pargeter's (he got the news about the pig there)."
         )
+    } else {
+        base
+    }
 }
 
 fn resident_status_text(resident: &village_sim::ClientResidentSnapshot) -> String {
@@ -1381,8 +1401,13 @@ fn resident_status_text(resident: &village_sim::ClientResidentSnapshot) -> Strin
         }
         lines
     };
+    let perception = match resident.recent_perception {
+        Some(ClientPerception::TookPargeterSeat) => "\nPerception: sat in the corner seat",
+        Some(ClientPerception::WitnessedPargeterSeat) => "\nPerception: tutted at the corner seat",
+        None => "",
+    };
     format!(
-        "{}\nToilet need: {need}\nIntention: {intention}\n{tasks}",
+        "{}\nToilet need: {need}\nIntention: {intention}\n{tasks}{perception}",
         resident.display_name
     )
 }
@@ -1614,9 +1639,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use village_sim::{
-        ClientIntention, ClientPlayerTaskSnapshot, ClientPlayerTaskState, ClientResidentSnapshot,
-        DefinitionId, PlayerCommand, PlayerCommandRejection, PlayerTaskId, ScenarioContent, SimId,
-        Simulation, TilePosition, TimeOfDay, WorldEvent, WorldEventKind,
+        ClientIntention, ClientPerception, ClientPlayerTaskSnapshot, ClientPlayerTaskState,
+        ClientResidentSnapshot, DefinitionId, PlayerCommand, PlayerCommandRejection, PlayerTaskId,
+        ScenarioContent, SimId, Simulation, TilePosition, TimeOfDay, WorldEvent, WorldEventKind,
     };
 
     use super::{
@@ -1655,6 +1680,68 @@ mod tests {
     }
 
     #[test]
+    fn semantic_feed_narrates_the_pargeter_seat_moment() {
+        let snapshot = village_sim::CottageSnapshot {
+            tick: 60,
+            time_of_day: TimeOfDay {
+                hour: 17,
+                minute: 0,
+            },
+            household_knows_pargeter_custom: true,
+            floors: Vec::new(),
+            objects: Vec::new(),
+            residents: vec![
+                ClientResidentSnapshot {
+                    id: SimId(1),
+                    definition_id: DefinitionId::new("person.newcomer_a"),
+                    display_name: "Rowan Bell".to_owned(),
+                    position: TilePosition {
+                        floor: 0,
+                        x: 22,
+                        y: 20,
+                    },
+                    toilet_need: Some(0),
+                    autonomous_intention: None,
+                    player_tasks: Vec::new(),
+                    recent_perception: Some(ClientPerception::TookPargeterSeat),
+                },
+                ClientResidentSnapshot {
+                    id: SimId(2),
+                    definition_id: DefinitionId::new("person.newcomer_b"),
+                    display_name: "Mara Bell".to_owned(),
+                    position: TilePosition {
+                        floor: 0,
+                        x: 25,
+                        y: 18,
+                    },
+                    toilet_need: None,
+                    autonomous_intention: None,
+                    player_tasks: Vec::new(),
+                    recent_perception: Some(ClientPerception::WitnessedPargeterSeat),
+                },
+            ],
+        };
+        let events = [WorldEvent {
+            tick: 60,
+            kind: WorldEventKind::PargeterSeatTaken {
+                participant: SimId(1),
+                witnessed_by: vec![SimId(2)],
+            },
+        }];
+        let mut feed = SemanticEventFeed::default();
+        let mut outcomes = BTreeMap::new();
+
+        consume_semantic_events(&mut feed, &events, &snapshot, &mut outcomes);
+
+        assert_eq!(
+            feed.entries,
+            [
+                "Rowan Bell took Mr Pargeter's corner seat. Mara Bell tuts. The household now know it is his."
+            ]
+        );
+    }
+
+    #[test]
     fn semantic_feed_announces_a_neighbour_invitation() {
         let snapshot = village_sim::CottageSnapshot {
             tick: 30,
@@ -1662,6 +1749,7 @@ mod tests {
                 hour: 16,
                 minute: 30,
             },
+            household_knows_pargeter_custom: false,
             floors: Vec::new(),
             objects: Vec::new(),
             residents: Vec::new(),
@@ -1730,6 +1818,7 @@ mod tests {
                     state: ClientPlayerTaskState::Paused,
                 },
             ],
+            recent_perception: None,
         };
 
         assert_eq!(
@@ -1743,6 +1832,7 @@ mod tests {
         let snapshot = village_sim::CottageSnapshot {
             tick: 0,
             time_of_day: village_sim::TimeOfDay { hour: 0, minute: 0 },
+            household_knows_pargeter_custom: false,
             floors: Vec::new(),
             objects: Vec::new(),
             residents: Vec::new(),
@@ -1974,6 +2064,7 @@ mod tests {
                 hour: 20,
                 minute: 15,
             },
+            household_knows_pargeter_custom: false,
             floors: Vec::new(),
             objects: Vec::new(),
             residents: Vec::new(),
@@ -2022,6 +2113,7 @@ mod tests {
                 hour: 20,
                 minute: 15,
             },
+            household_knows_pargeter_custom: false,
             floors: Vec::new(),
             objects: Vec::new(),
             residents: Vec::new(),
@@ -2052,6 +2144,7 @@ mod tests {
         let snapshot = village_sim::CottageSnapshot {
             tick: 0,
             time_of_day: village_sim::TimeOfDay { hour: 0, minute: 0 },
+            household_knows_pargeter_custom: false,
             floors: Vec::new(),
             objects: Vec::new(),
             residents: vec![ClientResidentSnapshot {
@@ -2075,6 +2168,7 @@ mod tests {
                         state: ClientPlayerTaskState::Paused,
                     },
                 ],
+                recent_perception: None,
             }],
         };
 

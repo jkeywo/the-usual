@@ -58,6 +58,17 @@ fn default_start_time_of_day() -> TimeOfDay {
     TimeOfDay { hour: 8, minute: 0 }
 }
 
+/// The King's Head opens in the early evening. The social charge of its corner
+/// seat only applies while the pub is open.
+pub const PUB_OPENS_AT: TimeOfDay = TimeOfDay {
+    hour: 17,
+    minute: 0,
+};
+
+/// A resident on the ground floor at or beyond this column is inside the pub
+/// region, and so may witness what happens there.
+const PUB_REGION_MIN_X: i32 = 20;
+
 /// A readable authored identifier, such as `person.newcomer_a`.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -630,6 +641,27 @@ pub enum WorldEventKind {
         host: DefinitionId,
         event_at: TimeOfDay,
     },
+    /// A resident took Mr Pargeter's corner seat while the pub was open. The
+    /// participant and any co-present witnesses form distinct perceptions.
+    PargeterSeatTaken {
+        participant: SimId,
+        witnessed_by: Vec<SimId>,
+    },
+}
+
+/// A resident's presentation-safe subjective take on a witnessed social
+/// moment. Distinct roles produce distinct perceptions of the same event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientPerception {
+    TookPargeterSeat,
+    WitnessedPargeterSeat,
+}
+
+/// A fact the household has come to know. The player only ever sees household
+/// knowledge, never omniscient world state.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum HouseholdKnowledge {
+    PargeterSeatCustom,
 }
 
 fn keyed_draw(seed: u64, tick: u64, event_id: u64, purpose: u64) -> u64 {
@@ -655,6 +687,8 @@ pub struct Simulation {
     start_minute_of_day: u32,
     invitations: Vec<InvitationDefinition>,
     fired_invitations: BTreeSet<usize>,
+    perceptions: BTreeMap<SimId, ClientPerception>,
+    household_knowledge: BTreeSet<HouseholdKnowledge>,
     next_sim_id: u64,
     residents: BTreeMap<SimId, Entity>,
     map: MapAsset,
@@ -683,6 +717,9 @@ pub struct Simulation {
 pub struct CottageSnapshot {
     pub tick: u64,
     pub time_of_day: TimeOfDay,
+    /// Whether the household has learned the corner-seat custom. This is the
+    /// visible knowledge result of the witnessed pub moment.
+    pub household_knows_pargeter_custom: bool,
     pub floors: Vec<FloorDefinition>,
     pub objects: Vec<SmartObjectDefinition>,
     pub residents: Vec<ClientResidentSnapshot>,
@@ -702,6 +739,8 @@ pub struct ClientResidentSnapshot {
     /// The resident's ordered player task queue, head first. Each entry is
     /// individually cancellable by its stable id.
     pub player_tasks: Vec<ClientPlayerTaskSnapshot>,
+    /// The resident's most recent subjective social perception, if any.
+    pub recent_perception: Option<ClientPerception>,
 }
 
 /// Presentation-safe names for the narrow set of autonomous intentions.
@@ -771,6 +810,8 @@ impl Simulation {
             start_minute_of_day: content.scenario.start_time_of_day.minute_of_day(),
             invitations: content.scenario.invitations,
             fired_invitations: BTreeSet::new(),
+            perceptions: BTreeMap::new(),
+            household_knowledge: BTreeSet::new(),
             next_sim_id: 1,
             residents: BTreeMap::new(),
             map: content.map,
@@ -951,12 +992,16 @@ impl Simulation {
                         .has_autonomous_toilet_intention(*id)
                         .then_some(ClientIntention::Toilet),
                     player_tasks,
+                    recent_perception: self.perceptions.get(id).copied(),
                 }
             })
             .collect();
         CottageSnapshot {
             tick: self.tick,
             time_of_day: self.time_of_day(),
+            household_knows_pargeter_custom: self
+                .household_knowledge
+                .contains(&HouseholdKnowledge::PargeterSeatCustom),
             floors: self.map.floors.clone(),
             objects: self.objects.values().cloned().collect(),
             residents,
@@ -1853,12 +1898,53 @@ impl Simulation {
             if let Some(task) = request.player_task {
                 self.player_tasks.insert(task, PlayerTaskState::Active);
             }
+            let participant = request.resident;
+            let took_pargeter_seat =
+                self.is_pargeter_seat(&request.object) && self.time_of_day() >= PUB_OPENS_AT;
             self.emit(WorldEventKind::ObjectUseStarted {
                 resident: request.resident,
                 object: request.object,
                 affordance: request.affordance,
             });
+            if took_pargeter_seat {
+                self.record_pargeter_seat_moment(participant);
+            }
         }
+    }
+
+    fn is_pargeter_seat(&self, object: &DefinitionId) -> bool {
+        self.objects
+            .get(object)
+            .is_some_and(|object| object.object_type == DefinitionId::new("object_type.seat"))
+    }
+
+    /// Records the distinct participant and witness perceptions of taking the
+    /// corner seat, and the household knowledge it establishes. This is the
+    /// first, deliberately narrow slice of the wider social-consequences model.
+    fn record_pargeter_seat_moment(&mut self, participant: SimId) {
+        let witnesses = self
+            .residents
+            .keys()
+            .copied()
+            .filter(|resident| *resident != participant && self.resident_in_pub_region(*resident))
+            .collect::<Vec<_>>();
+        self.perceptions
+            .insert(participant, ClientPerception::TookPargeterSeat);
+        for witness in &witnesses {
+            self.perceptions
+                .insert(*witness, ClientPerception::WitnessedPargeterSeat);
+        }
+        self.household_knowledge
+            .insert(HouseholdKnowledge::PargeterSeatCustom);
+        self.emit(WorldEventKind::PargeterSeatTaken {
+            participant,
+            witnessed_by: witnesses,
+        });
+    }
+
+    fn resident_in_pub_region(&self, resident: SimId) -> bool {
+        self.resident_position(resident)
+            .is_some_and(|position| position.floor == 0 && position.x >= PUB_REGION_MIN_X)
     }
 
     fn recover_toilet_need(&mut self, resident: SimId) {
@@ -2576,6 +2662,97 @@ mod tests {
             })
             .count();
         assert_eq!(started, 2, "both residents are eventually served");
+    }
+
+    #[test]
+    fn taking_the_pargeter_seat_while_open_yields_distinct_perceptions_and_knowledge() {
+        let mut simulation = load_simulation();
+        let seat = DefinitionId::new("object.pargeter_seat");
+        let take = DefinitionId::new("affordance.take_seat");
+        let participant = SimId(1);
+        let witness = SimId(2);
+        let participant_tile = TilePosition {
+            floor: 0,
+            x: 23,
+            y: 20,
+        };
+        let witness_tile = TilePosition {
+            floor: 0,
+            x: 25,
+            y: 18,
+        };
+
+        assert!(simulation.begin_go_to(participant, participant_tile));
+        assert!(simulation.begin_go_to(witness, witness_tile));
+        // Advance into the pub and past opening time (17:00), keeping the
+        // participant's toilet need suppressed so the walk is not diverted.
+        for _ in 0..120 {
+            simulation.set_toilet_need(participant, 0);
+            simulation.advance_tick();
+            let both_arrived = simulation.resident_position(participant) == Some(participant_tile)
+                && simulation.resident_position(witness) == Some(witness_tile);
+            if both_arrived && simulation.time_of_day() >= PUB_OPENS_AT {
+                break;
+            }
+        }
+        assert!(simulation.time_of_day() >= PUB_OPENS_AT);
+        assert_eq!(
+            simulation.resident_position(participant),
+            Some(participant_tile)
+        );
+
+        simulation.set_toilet_need(participant, 0);
+        assert!(simulation.begin_use_object(participant, &seat, &take, 0));
+        simulation.advance_tick();
+
+        assert!(simulation.event_ledger().iter().any(|event| {
+            event.kind
+                == WorldEventKind::PargeterSeatTaken {
+                    participant,
+                    witnessed_by: vec![witness],
+                }
+        }));
+        let snapshot = simulation.cottage_snapshot();
+        assert!(snapshot.household_knows_pargeter_custom);
+        let perception = |id: SimId| {
+            snapshot
+                .residents
+                .iter()
+                .find(|resident| resident.id == id)
+                .and_then(|resident| resident.recent_perception)
+        };
+        assert_eq!(
+            perception(participant),
+            Some(ClientPerception::TookPargeterSeat)
+        );
+        assert_eq!(
+            perception(witness),
+            Some(ClientPerception::WitnessedPargeterSeat)
+        );
+    }
+
+    #[test]
+    fn taking_the_seat_before_the_pub_opens_carries_no_social_charge() {
+        let mut simulation = load_simulation();
+        let seat = DefinitionId::new("object.pargeter_seat");
+        let take = DefinitionId::new("affordance.take_seat");
+
+        // The scenario starts at 16:00, before the 17:00 opening.
+        assert!(simulation.time_of_day() < PUB_OPENS_AT);
+        assert!(simulation.begin_use_object(SimId(1), &seat, &take, 0));
+        simulation.advance_tick();
+
+        assert!(
+            !simulation
+                .event_ledger()
+                .iter()
+                .any(|event| { matches!(event.kind, WorldEventKind::PargeterSeatTaken { .. }) })
+        );
+        assert!(
+            !simulation
+                .cottage_snapshot()
+                .household_knows_pargeter_custom
+        );
     }
 
     #[test]
