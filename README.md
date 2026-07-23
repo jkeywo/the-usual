@@ -4,6 +4,8 @@ A pixel-art village-life simulation about a newcomer household trying to get
 through the day, keep a home in order, and become somebody whose presence
 matters in a slightly timeless British village.
 
+**▶ Play in the browser: https://jkeywo.github.io/the-usual/**
+
 The player queues, promotes, forces, and cancels tasks for their household.
 Those tasks use the same autonomous planning, conducts, smart objects, and
 capability arbitration as everyone else.
@@ -30,7 +32,8 @@ cargo test --workspace
 ## Web build
 
 The Bevy client also builds to WebAssembly and is published to GitHub Pages by
-`.github/workflows/pages.yml` on every push to `main`.
+`.github/workflows/pages.yml` on every push to `main`, and served at
+<https://jkeywo.github.io/the-usual/>.
 
 One-time setup: in the repository, open **Settings -> Pages -> Build and
 deployment** and set **Source** to **GitHub Actions**. After the next push to
